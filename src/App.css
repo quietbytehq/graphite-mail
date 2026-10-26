@@ -562,3 +562,5 @@ button.toggled { background: color-mix(in srgb, var(--accent) 16%, var(--field))
 .admin-approval p { margin: 0; }
 .admin-approval details { font-size: 12.5px; }
 .admin-approval summary { cursor: default; }
+.evframe { display: flex; min-height: 160px; max-height: 320px; border: 1px solid var(--separator); border-radius: 10px; overflow: hidden; }
+.evframe iframe { flex: 1; border: 0; width: 100%; min-height: 160px; background: #fff; }

@@ -1,0 +1,24 @@
+<html><head><style>
+@import url("https://evil.example/import.css");
+@import "https://evil.example/import2.css";
+@font-face { font-family: Spy; src: url(https://evil.example/font.woff2); }
+body { background-image: url('https://evil.example/body-bg.png'); }
+.x { background: image-set("https://evil.example/set.png" 1x); }
+.y { list-style-image: url(//evil.example/bullet.png); }
+.ok { background: url(data:image/gif;base64,R0lGODlhAQABAAAAACw=); }
+</style></head>
+<body background="https://evil.example/body-attr.png">
+<p>Hostile fixture 06: tracking pixels and remote resources. Nothing may load until "Load images" is pressed.</p>
+<img src="https://evil.example/pixel.gif?u=you" width="1" height="1" alt="">
+<img src="http://evil.example/pixel-http.gif" width="1" height="1" alt="">
+<img src="//evil.example/pixel-relative-scheme.gif" width="1" height="1" alt="">
+<img src=" https://evil.example/leading-space.gif" alt="">
+<img srcset="https://evil.example/srcset-1x.png 1x, https://evil.example/srcset-2x.png 2x" alt="">
+<picture><source srcset="https://evil.example/picture.webp"><img src="https://evil.example/picture.png" alt=""></picture>
+<table background="https://evil.example/table-bg.png"><tr><td background="https://evil.example/td-bg.png" style="background-image:url(https://evil.example/td-style.png)">cell</td></tr></table>
+<div style="background:url(&quot;https://evil.example/div-style.png&quot;)">styled div</div>
+<video poster="https://evil.example/poster.png" src="https://evil.example/video.mp4"></video>
+<audio src="https://evil.example/audio.mp3" autoplay></audio>
+<img src="file:///etc/passwd" alt="file image">
+<img src="javascript:parent.__pwned='img-js'" alt="js image">
+</body></html>

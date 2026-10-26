@@ -1,0 +1,13 @@
+<html><head><style onload="parent.__pwned='style-onload'">p{color:#333}</style></head>
+<body onload="parent.__pwned='body-onload'" onpageshow="parent.__pwned='pageshow'">
+<p>Hostile fixture 02: event handler attributes (onerror, onload, onmouseover …).</p>
+<img src="x" onerror="parent.__pwned='img-onerror'">
+<img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" onload="parent.__pwned='img-onload'" alt="inline">
+<svg onload="parent.__pwned='svg-onload'"><circle r="5"/></svg>
+<div onmouseover="parent.__pwned='mouseover'" onclick="parent.__pwned='click'">Hover or click me</div>
+<details open ontoggle="parent.__pwned='ontoggle'"><summary>details</summary>x</details>
+<video><source onerror="parent.__pwned='source-onerror'"></video>
+<input autofocus onfocus="parent.__pwned='onfocus'">
+<a href="https://example.com/" onclick="parent.__pwned='link-onclick'">A link with an onclick</a>
+<p ONMOUSEENTER="parent.__pwned='upper'">Upper-case handler</p>
+</body></html>

@@ -1,0 +1,14 @@
+<html><head>
+<meta http-equiv="refresh" content="0;url=https://evil.example/refresh">
+<meta http-equiv="Content-Security-Policy" content="default-src *">
+<base href="https://evil.example/" target="_top">
+<link rel="stylesheet" href="https://evil.example/style.css">
+<link rel="prefetch" href="https://evil.example/prefetch">
+<link rel="dns-prefetch" href="//tracker.evil.example">
+<link rel="preconnect" href="https://evil.example">
+</head><body>
+<p>Hostile fixture 05: meta refresh, base, link tags. The message must stay put and load nothing.</p>
+<meta http-equiv="refresh" content="1; URL='javascript:parent.__pwned=1'">
+<meta http-equiv="set-cookie" content="a=b">
+<img src="relative.gif" alt="relative image against an evil base">
+</body></html>

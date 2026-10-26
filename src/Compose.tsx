@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import DOMPurify from "dompurify";
 import { open as pickFiles } from "@tauri-apps/plugin-dialog";
 import RecipientInput from "./RecipientInput";
+import { sanitizedFragment } from "./emailHtml";
 
 export type ComposeInit = {
   mode: "new" | "reply" | "replyAll" | "forward";
@@ -12,8 +12,11 @@ export type ComposeInit = {
   /** Blind copies. Never carried over from a received message (replies and forwards start without any). */
   bcc?: string[];
   subject?: string;
+  /** The message being answered (untrusted email HTML: sanitised and inserted as nodes) and its header (plain text). */
   quoteHtml?: string;
   quoteHeader?: string;
+  /** The user loaded the quoted message's remote images, so the quote may keep them. */
+  quoteImages?: boolean;
   /** Account (email) to send from. */
   from?: string;
   /** Set when reopening a saved draft: its id, the editor's saved HTML and files. */
@@ -50,14 +53,22 @@ export default function Compose({ init, accounts, onClose, onSent }: { init: Com
     (async () => {
       if (body.current) {
         if (init.html !== undefined) {
-          body.current.innerHTML = init.html; // a saved draft comes back exactly as it was
+          // A saved draft comes back as it was, minus anything a sanitiser would remove (it can quote an email).
+          body.current.replaceChildren(sanitizedFragment(init.html, true));
         } else {
           const sig = sigBlock(await invoke<string>("get_signature", { email: from }).catch(() => ""));
           if (!body.current) return; // the editor was closed while the signature was being fetched
-          body.current.innerHTML = init.quoteHtml
-            ? `<p><br></p>${sig}<p><br></p><hr><p style="color:#888">${init.quoteHeader ?? ""}</p>` +
-              `<blockquote style="margin:0 0 0 8px;padding-left:10px;border-left:3px solid #ccc">${DOMPurify.sanitize(init.quoteHtml, { FORBID_TAGS: ["style", "script"] })}</blockquote>`
-            : `<p><br></p>${sig}`;
+          body.current.innerHTML = `<p><br></p>${sig}`; // our own markup; the signature text is escaped
+          if (init.quoteHtml) {
+            const para = () => { const p = document.createElement("p"); p.append(document.createElement("br")); return p; };
+            const header = document.createElement("p");
+            header.style.color = "#888";
+            header.textContent = init.quoteHeader ?? "";
+            const quote = document.createElement("blockquote");
+            quote.setAttribute("style", "margin:0 0 0 8px;padding-left:10px;border-left:3px solid #ccc");
+            quote.append(sanitizedFragment(init.quoteHtml, !!init.quoteImages));
+            body.current.append(para(), document.createElement("hr"), header, quote);
+          }
         }
       }
       (init.mode === "forward" || !init.to?.length ? document.getElementById("cmp-to") : body.current)?.focus();

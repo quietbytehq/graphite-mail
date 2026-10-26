@@ -1,0 +1,28 @@
+<html><body>
+<p>Hostile fixture 03: link schemes. Only the https, http and mailto links may do anything, and only in the system browser / composer.</p>
+<ul>
+<li><a href="javascript:parent.__pwned='js'">javascript: link</a></li>
+<li><a href="javascript:parent.__pwned='js-blank'" target="_blank">javascript: link, target=_blank</a></li>
+<li><a href="JaVaScRiPt:parent.__pwned='mixed-case'">JaVaScRiPt: link</a></li>
+<li><a href="java&#09;script:parent.__pwned='tab'">java&lt;TAB&gt;script: link</a></li>
+<li><a href=" &#14; javascript:parent.__pwned='leading-ctrl'">leading blank + control char</a></li>
+<li><a href="data:text/html,&lt;script&gt;alert(1)&lt;/script&gt;">data: link</a></li>
+<li><a href="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==" target="_blank">data: link, target=_blank</a></li>
+<li><a href="file:///etc/passwd">file: link</a></li>
+<li><a href="file:///C:/Windows/System32/calc.exe" target="_blank">file: link to calc.exe, target=_blank</a></li>
+<li><a href="vbscript:msgbox(1)">vbscript: link</a></li>
+<li><a href="smb://evil.example/share">smb: link</a></li>
+<li><a href="ms-msdt:/id PCWDiagnostic">ms-msdt: link</a></li>
+<li><a href="https://example.com/top" target="_top">https link, target=_top</a></li>
+<li><a href="https://example.com/self" target="_self">https link, target=_self</a></li>
+<li><a href="https://example.com/parent" target="_parent">https link, target=_parent</a></li>
+<li><a href="https://example.com/named" target="someframe">https link, named target</a></li>
+<li><a href="https://example.com/plain">https link, no target (allowed: system browser)</a></li>
+<li><a href="http://example.com/plain" target="_blank">http link, target=_blank (allowed: system browser)</a></li>
+<li><a href="mailto:someone@example.com?subject=hi">mailto link (allowed: composer)</a></li>
+<li><a href="relative/path.html">relative link</a></li>
+<li><a href="#section">fragment link</a></li>
+</ul>
+<img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" usemap="#m" width="20" height="20" alt="map">
+<map name="m"><area shape="rect" coords="0,0,20,20" href="javascript:parent.__pwned='area'"></map>
+</body></html>

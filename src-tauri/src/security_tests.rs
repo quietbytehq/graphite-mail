@@ -160,16 +160,47 @@ fn only_the_main_window_has_a_capability_file() {
 
 #[test]
 fn the_email_frame_can_only_ask_for_popups_which_the_app_turns_into_checked_links() {
-    let mailbox = std::fs::read_to_string(root().join("../src/Mailbox.tsx")).unwrap();
-    let sandbox = mailbox.split("<iframe sandbox=\"").nth(1).and_then(|r| r.split('"').next()).expect("email iframe");
+    let html = std::fs::read_to_string(root().join("../src/emailHtml.ts")).unwrap();
+    let sandbox = html.split("export const FRAME_SANDBOX = \"").nth(1).and_then(|r| r.split('"').next()).expect("FRAME_SANDBOX");
     let flags: Vec<&str> = sandbox.split_whitespace().collect();
-    assert_eq!(flags, vec!["allow-same-origin", "allow-popups"], "no scripts, forms, top navigation or popup escape in emails");
-    assert!(mailbox.contains("node.setAttribute(\"target\", \"_blank\")"), "links ask for a new window");
+    assert_eq!(flags, vec!["allow-popups"], "no scripts, same-origin, forms, top navigation or popup escape in emails");
+    assert!(html.contains("node.setAttribute(\"target\", \"_blank\")"), "links ask for a new window");
+    assert!(html.contains("purify.sanitize("), "email HTML goes through DOMPurify");
+    let frame = std::fs::read_to_string(root().join("../src/MessageFrame.tsx")).unwrap();
+    assert!(frame.contains("sandbox={FRAME_SANDBOX}"));
+    // Every frame showing untrusted HTML is the MessageFrame; nothing else makes an iframe.
+    for (f, t) in frontend_sources() {
+        if !f.ends_with("MessageFrame.tsx") && !f.to_string_lossy().contains(".test.") {
+            assert!(!t.contains("<iframe"), "{}: use MessageFrame", f.display());
+        }
+    }
     let lib = std::fs::read_to_string(root().join("src/lib.rs")).unwrap();
     assert!(lib.contains(".on_new_window(") && lib.contains("NewWindowResponse::Deny"), "the app must refuse every new window");
     assert!(lib.contains(".on_navigation("));
 }
 
+/// Email HTML never reaches the app's own DOM as an HTML string: no dangerouslySetInnerHTML at all, and the only
+/// innerHTML/insertAdjacentHTML writes are the composer's own markup (blank lines and the escaped signature).
+#[test]
+fn email_html_is_never_inserted_with_inner_html() {
+    let allowed = [
+        "body.current.innerHTML = `<p><br></p>${sig}`; // our own markup; the signature text is escaped",
+        "holder.innerHTML = esc((await invoke<string>(\"get_signature\", { email }).catch(() => \"\")).trim());",
+        "if (sig) body.current.insertAdjacentHTML(\"afterbegin\", `<p><br></p>${sig}`);",
+    ];
+    for (f, t) in frontend_sources() {
+        if f.to_string_lossy().contains(".test.") {
+            continue;
+        }
+        assert!(!t.contains("dangerouslySetInnerHTML"), "{}", f.display());
+        for line in t.lines().map(str::trim) {
+            let writes = line.contains("insertAdjacentHTML") || line.contains("outerHTML =") || line.split("innerHTML").skip(1).any(|rest| rest.trim_start().starts_with('=') && !rest.trim_start().starts_with("=="));
+            if writes {
+                assert!(allowed.contains(&line), "{}: HTML string written into the page: {line}", f.display());
+            }
+        }
+    }
+}
 
 #[test]
 fn the_app_password_account_type_needs_no_google_client() {

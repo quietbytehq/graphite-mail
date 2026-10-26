@@ -672,6 +672,9 @@ pub fn run() {
                 .on_new_window(move |url, _features| new_window_request(&handle2, url))
                 .build()?;
             match tauri::WebviewWindowBuilder::new(app, "splash", tauri::WebviewUrl::App("splash.html".into()))
+                // The splash only ever shows its own page: no links, no other pages, no windows.
+                .on_navigation(|url| links::classify(url, cfg!(dev)) == links::Action::Allow)
+                .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
                 .title("Graphite Mail")
                 .inner_size(520.0, 520.0)
                 .decorations(false)

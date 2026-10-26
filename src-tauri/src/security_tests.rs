@@ -176,7 +176,10 @@ fn the_email_frame_can_only_ask_for_popups_which_the_app_turns_into_checked_link
     }
     let lib = std::fs::read_to_string(root().join("src/lib.rs")).unwrap();
     assert!(lib.contains(".on_new_window(") && lib.contains("NewWindowResponse::Deny"), "the app must refuse every new window");
-    assert!(lib.contains(".on_navigation("));
+    // Both windows (main and splash) have a navigation and a new-window handler.
+    assert_eq!(lib.matches(".on_navigation(").count(), 2, "every window gets a navigation handler");
+    assert_eq!(lib.matches(".on_new_window(").count(), 2, "every window refuses new windows");
+    assert_eq!(lib.matches("WebviewWindowBuilder::").count(), 2, "a new window needs the same handlers");
 }
 
 /// Email HTML never reaches the app's own DOM as an HTML string: no dangerouslySetInnerHTML at all, and the only

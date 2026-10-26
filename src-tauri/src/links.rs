@@ -24,12 +24,13 @@ pub fn classify(url: &Url, dev: bool) -> Action {
         return Action::Deny;
     }
     match url.scheme() {
-        // The app's own pages and the (srcdoc) email frame.
-        "tauri" | "ipc" | "asset" => Action::Allow,
+        // The app's own pages (tauri://localhost on Linux, http://tauri.localhost on Windows) and the (srcdoc) email
+        // frame. Nothing else is ever loaded into the window: not another host on the app's scheme, not ipc:/asset:.
+        "tauri" => if url.host_str() == Some("localhost") { Action::Allow } else { Action::Deny },
         "about" => if matches!(url.path(), "srcdoc" | "blank") { Action::Allow } else { Action::Deny },
         "http" | "https" => {
             let host = url.host_str().unwrap_or_default();
-            if matches!(host, "tauri.localhost" | "ipc.localhost" | "asset.localhost") || (dev && matches!(host, "localhost" | "127.0.0.1")) {
+            if host == "tauri.localhost" || (dev && matches!(host, "localhost" | "127.0.0.1")) {
                 return Action::Allow;
             }
             match external(url.as_str()) {
@@ -124,7 +125,12 @@ mod tests {
     #[test]
     fn app_pages_are_loaded_but_other_about_pages_are_not() {
         assert_eq!(act("tauri://localhost/index.html"), Action::Allow);
-        assert_eq!(act("ipc://localhost/cmd"), Action::Allow);
+        // the window never navigates to another host on the app's scheme, or to the IPC/asset schemes
+        assert_eq!(act("tauri://evil.example/index.html"), Action::Deny);
+        assert_eq!(act("ipc://localhost/cmd"), Action::Deny);
+        assert_eq!(act("asset://localhost/etc/passwd"), Action::Deny);
+        assert!(matches!(act("http://ipc.localhost/cmd"), Action::OpenExternal(_)), "not loaded in the app");
+        assert!(matches!(act("http://tauri.localhost.evil.example/"), Action::OpenExternal(_)), "a look-alike host is just a web link");
         assert_eq!(act("about:srcdoc"), Action::Allow);
         assert_eq!(act("about:blank"), Action::Allow);
         assert_eq!(act("about:config"), Action::Deny);
@@ -146,6 +152,18 @@ mod tests {
         assert!(external("https://").is_err());
         assert!(external(&format!("https://example.com/{}", "a".repeat(9000))).unwrap_err().contains("too long"));
         assert_eq!(act(&format!("https://example.com/{}", "a".repeat(9000))), Action::Deny);
+    }
+
+    #[test]
+    fn disguised_schemes_and_targets_change_nothing() {
+        // Browsers drop tabs and line breaks inside a scheme and ignore leading blanks; so does the URL parser here.
+        for u in ["java\tscript:alert(1)", "java\nscript:alert(1)", " javascript:alert(1)", "\u{1}javascript:x", "jav&#x09;ascript:x", "data:,x", "DATA:text/html,x"] {
+            assert_eq!(act(u), Action::Deny, "{u:?}");
+        }
+        // The same decision applies whether the click navigated the frame or asked for a new window
+        // (target=_blank, _top, _parent, named): both handlers call classify().
+        assert!(matches!(act("https://example.com/?a=<script>"), Action::OpenExternal(_)));
+        assert_eq!(act("https://"), Action::Deny);
     }
 
     #[test]

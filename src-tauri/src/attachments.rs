@@ -53,7 +53,8 @@ fn owner_of_message(message_id: &str) -> Result<Owner> {
 fn rows(message_id: &str) -> Result<Vec<AttachmentRow>> {
     storage::with_db(|db| {
         let mut st = db.prepare("SELECT id, filename, mime_type, size_bytes, is_downloaded FROM attachments WHERE message_id=?1 AND is_inline=0 ORDER BY rowid")?;
-        let r = st.query_map([message_id], |r| Ok(AttachmentRow { id: r.get(0)?, name: r.get(1)?, mime: r.get(2)?, size: r.get(3)?, downloaded: r.get(4)? }))?;
+        // Names are shown (and offered in the save dialog) the way they would be written.
+        let r = st.query_map([message_id], |r| Ok(AttachmentRow { id: r.get(0)?, name: safe_name(&r.get::<_, String>(1)?), mime: r.get(2)?, size: r.get(3)?, downloaded: r.get(4)? }))?;
         Ok(r.filter_map(|x| x.ok()).collect())
     })
 }
@@ -149,54 +150,158 @@ pub async fn bytes(att_id: &str) -> Result<(String, Vec<u8>)> {
     Ok((a.name, data))
 }
 
-/// File names that could run code when opened; these are saved, never opened straight away.
+/// Extensions of files that can run code (or install, mount or change settings) when opened. Attachments with these,
+/// or with no extension at all, are only ever saved, never opened from the app.
+const RISKY: &[&str] = &[
+    // Windows
+    "exe", "com", "scr", "pif", "bat", "cmd", "msi", "msp", "mst", "msix", "msixbundle", "appx", "appxbundle", "appinstaller",
+    "cpl", "dll", "ocx", "sys", "drv", "hta", "jar", "js", "jse", "vbs", "vbe", "vb", "wsf", "wsh", "wsc", "ws", "ps1", "ps1xml",
+    "ps2", "psc1", "psm1", "psd1", "msc", "msh", "reg", "inf", "scf", "lnk", "url", "website", "application", "gadget",
+    "settingcontent-ms", "library-ms", "search-ms", "iso", "img", "vhd", "vhdx", "chm", "hlp", "xll", "xlam", "ppam", "mde",
+    "accde", "appref-ms", "diagcab", "msdt", "one", "xbap",
+    // Linux and other Unix
+    "sh", "bash", "zsh", "csh", "ksh", "fish", "run", "bin", "out", "elf", "appimage", "desktop", "deb", "rpm", "snap",
+    "flatpakref", "flatpakrepo", "py", "pyc", "pyw", "pl", "rb", "php", "lua", "tcl", "awk", "command", "so", "ko", "apk",
+];
+
+/// File names that could run code when opened; these are saved, never opened straight away. Judged on the name as it
+/// would be written (so "evil.exe." and "evil.exe " count as .exe, as Windows would treat them).
 pub fn risky(name: &str) -> bool {
-    let n = name.to_lowercase();
-    [".exe", ".sh", ".bat", ".cmd", ".com", ".scr", ".msi", ".appimage", ".desktop", ".jar", ".js", ".vbs", ".ps1", ".run", ".bin", ".pif", ".lnk", ".py", ".pl"]
-        .iter()
-        .any(|e| n.ends_with(e))
+    let n = safe_name(name).to_lowercase();
+    match n.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => RISKY.contains(&ext),
+        _ => true, // no extension: the system would decide by content, which can mean "run it"
+    }
 }
 
-/// A file name that is safe on every platform: no path separators or control characters, none of the characters
-/// Windows refuses (`< > : " | ? *`), no trailing dots or spaces, and not a Windows device name (CON, NUL, COM1…).
+/// Characters that only change how text is shown (right-to-left overrides, invisible marks): "invoice\u{202E}fdp.exe"
+/// would display as "invoiceexe.pdf".
+fn invisible(c: char) -> bool {
+    matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}' | '\u{061C}' | '\u{180E}')
+}
+
+const MAX_NAME_BYTES: usize = 180;
+
+/// A file name that is safe on every platform: no path separators, no "..", no control or invisible characters, none of
+/// the characters Windows refuses (`< > : " | ? *`), no leading dots, no trailing dots or spaces, not a Windows
+/// device name (CON, NUL, COM1, LPT¹…), and not absurdly long (the extension is kept).
 pub(crate) fn safe_name(name: &str) -> String {
-    let cleaned: String = name.chars().map(|c| if matches!(c, '/' | '\\' | '\0' | '<' | '>' | ':' | '"' | '|' | '?' | '*') || c.is_control() { '_' } else { c }).collect();
-    let cleaned = cleaned.trim().trim_start_matches('.').trim_end_matches(|c| c == '.' || c == ' ').to_string();
-    if cleaned.is_empty() {
+    let cleaned: String = name
+        .chars()
+        .filter(|c| !invisible(*c))
+        .map(|c| if matches!(c, '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*') || c.is_control() { '_' } else { c })
+        .collect();
+    let mut cleaned = cleaned;
+    while cleaned.contains("..") {
+        cleaned = cleaned.replace("..", ".");
+    }
+    let mut cleaned = cleaned.trim().trim_start_matches('.').trim_end_matches(['.', ' ']).to_string();
+    if cleaned.len() > MAX_NAME_BYTES {
+        let ext = cleaned.rsplit_once('.').map(|(_, e)| e).filter(|e| e.len() <= 16).map(|e| format!(".{e}")).unwrap_or_default();
+        let mut stem: String = String::new();
+        for c in cleaned.chars() {
+            if stem.len() + c.len_utf8() + ext.len() > MAX_NAME_BYTES {
+                break;
+            }
+            stem.push(c);
+        }
+        cleaned = format!("{}{ext}", stem.trim_end_matches(['.', ' ']));
+    }
+    if cleaned.trim_matches('_').is_empty() || cleaned.is_empty() {
         return "attachment".into();
     }
-    let stem = cleaned.split('.').next().unwrap_or("").to_ascii_uppercase();
-    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.as_bytes()[3].is_ascii_digit());
+    // Windows ignores everything from the first dot, and blanks before it, when it looks for device names.
+    let stem = cleaned.split('.').next().unwrap_or("").trim_end().to_uppercase();
+    let numbered = |p: &str| stem.strip_prefix(p).is_some_and(|d| matches!(d, "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"));
+    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" | "CLOCK$") || numbered("COM") || numbered("LPT");
     if device { format!("_{cleaned}") } else { cleaned }
 }
 
-/// Where opened attachments are put; emptied at every start.
+/// The path an attachment called `name` gets inside `folder`: a safe name, and never anywhere but directly in the folder.
+pub(crate) fn place(folder: &Path, name: &str) -> Result<PathBuf> {
+    let folder = dunce::canonicalize(folder).map_err(|_| anyhow!("That folder doesn't exist."))?;
+    if !folder.is_dir() {
+        bail!("That isn't a folder.");
+    }
+    let path = folder.join(safe_name(name));
+    if path.parent() != Some(folder.as_path()) {
+        bail!("That file name can't be used.");
+    }
+    if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink() || m.is_dir()) {
+        bail!("There is a link or folder with that name already; choose another name.");
+    }
+    Ok(path)
+}
+
+/// Writes an attachment's bytes: a new private file (never through a link), never executable, and on Windows marked as
+/// coming from the internet so the system warns before running anything from it.
+fn write_file(path: &Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut f = o.open(path)?;
+    f.write_all(data)?;
+    f.sync_all()?;
+    #[cfg(windows)]
+    {
+        let mut ads = path.as_os_str().to_owned();
+        ads.push(":Zone.Identifier");
+        let _ = std::fs::write(ads, b"[ZoneTransfer]\r\nZoneId=3\r\n");
+    }
+    Ok(())
+}
+
+/// Where opened attachments are put (a private per-user folder); emptied at every start.
 pub fn temp_root() -> PathBuf {
-    std::env::temp_dir().join("graphite-mail-attachments")
+    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("graphite-mail").join("opened-attachments")
 }
 
 pub fn clear_temp() {
     let _ = std::fs::remove_dir_all(temp_root());
+    // Versions before 1.12 used a shared folder in /tmp.
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join("graphite-mail-attachments"));
 }
 
-/// Writes the file to a private temp folder and returns its path (the caller opens it).
+/// Writes the file to a private temp folder and returns its path (the caller opens it). Files that could run are
+/// refused here, so the app never hands them to the system to open.
 pub async fn prepare_open(att_id: &str) -> Result<PathBuf> {
     let a = load(att_id)?;
     if risky(&a.name) {
-        bail!("For your safety “{}” can't be opened straight from an email. Use Save, and open it yourself if you trust it.", a.name);
+        bail!("For your safety “{}” can't be opened straight from an email. Use Save, and open it yourself if you trust it.", safe_name(&a.name));
     }
     let (name, data) = bytes(att_id).await?;
     let dir = temp_root().join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join(safe_name(&name));
-    std::fs::write(&path, data)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for d in [temp_root().parent().unwrap_or(&dir), temp_root().as_path(), dir.as_path()] {
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    let path = place(&dir, &name)?;
+    write_file(&path, &data)?;
     Ok(path)
 }
 
-pub async fn save(att_id: &str, dest: &str) -> Result<()> {
+/// Saves a copy where the user chose. Only the chosen folder is used as given: the file name is made safe, so the
+/// file always lands directly in that folder. Returns where it was written.
+pub async fn save(att_id: &str, dest: &str) -> Result<PathBuf> {
+    let dest = Path::new(dest);
+    if dest.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        bail!("Choose a folder to save into.");
+    }
+    let folder = dest.parent().filter(|p| !p.as_os_str().is_empty()).ok_or(anyhow!("Choose a folder to save into."))?;
+    let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let path = place(folder, &name)?;
     let (_, data) = bytes(att_id).await?;
-    std::fs::write(Path::new(dest), data).map_err(|e| anyhow!("Couldn't save the file: {e}"))
+    write_file(&path, &data).map_err(|e| anyhow!("Couldn't save the file: {e}"))?;
+    Ok(path)
 }
 
 /// Files chosen in the editor → blobs + the list stored in the queued message. Enforces the size limit.
@@ -258,9 +363,113 @@ mod tests {
         for n in ["report.pdf", "photo.jpg", "notes.txt", "sheet.xlsx"] {
             assert!(!risky(n), "{n}");
         }
-        assert_eq!(safe_name("../../etc/passwd"), "_.._etc_passwd"); // no folder tricks
-        assert_eq!(safe_name("..."), "attachment");
-        assert_eq!(safe_name("a/b\\c.txt"), "a_b_c.txt");
+    }
+
+    /// Names an attacker could put in an email, and what they become.
+    const HOSTILE: &[(&str, &str)] = &[
+        ("../../etc/passwd", "_._etc_passwd"),
+        ("..\\..\\Windows\\System32\\evil.dll", "_._Windows_System32_evil.dll"),
+        ("/etc/cron.d/backdoor", "_etc_cron.d_backdoor"),
+        ("C:\\Windows\\win.ini", "C__Windows_win.ini"),
+        ("\\\\server\\share\\x.txt", "__server_share_x.txt"),
+        ("a/../../b.txt", "a_._._b.txt"),
+        ("~/.ssh/authorized_keys", "~_.ssh_authorized_keys"),
+        ("..", "attachment"),
+        (".", "attachment"),
+        ("...", "attachment"),
+        ("", "attachment"),
+        ("   ", "attachment"),
+        ("/", "attachment"),
+        ("..\\", "attachment"),
+        (".bashrc", "bashrc"),
+        ("CON", "_CON"),
+        ("con.txt", "_con.txt"),
+        ("NUL.tar.gz", "_NUL.tar.gz"),
+        ("COM1", "_COM1"),
+        ("lpt9.doc", "_lpt9.doc"),
+        ("CON .txt", "_CON .txt"),
+        ("AUX.", "_AUX"),
+        ("CONIN$", "_CONIN$"),
+        ("COM¹.txt", "_COM¹.txt"),
+        ("COM10.txt", "COM10.txt"),
+        ("CONSOLE.txt", "CONSOLE.txt"),
+        ("file\u{0}name.txt", "file_name.txt"),
+        ("line\nbreak\r.txt", "line_break_.txt"),
+        ("tab\tname.pdf", "tab_name.pdf"),
+        ("bell\u{7}\u{1b}[31m.txt", "bell__[31m.txt"),
+        ("invoice\u{202E}fdp.exe", "invoicefdp.exe"),
+        ("\u{202E}gpj.sh", "gpj.sh"),
+        ("zero\u{200B}width\u{FEFF}.pdf", "zerowidth.pdf"),
+        ("report:Zone.Identifier", "report_Zone.Identifier"),
+        ("what?<>|*\".txt", "what______.txt"),
+        ("evil.exe.", "evil.exe"),
+        ("evil.exe   ", "evil.exe"),
+        ("photo.jpg.exe", "photo.jpg.exe"),
+        ("Ünïcødé – ok.pdf", "Ünïcødé – ok.pdf"),
+    ];
+
+    #[test]
+    fn hostile_attachment_names_are_made_safe() {
+        for (raw, want) in HOSTILE {
+            let got = safe_name(raw);
+            assert_eq!(&got, want, "{raw:?}");
+            assert!(!got.contains(['/', '\\', ':', '\0']) && !got.contains("..") && !got.chars().any(char::is_control), "{raw:?} -> {got:?}");
+            assert!(!got.starts_with('.') && !got.ends_with(['.', ' ']), "{got:?}");
+        }
+        // very long names are cut, keeping the extension
+        let long = safe_name(&format!("{}.pdf", "a".repeat(400)));
+        assert!(long.len() <= 180 && long.ends_with(".pdf"), "{long}");
+        let multi = safe_name(&format!("{}.pdf", "é".repeat(300)));
+        assert!(multi.len() <= 180 && multi.ends_with(".pdf"));
+        // a name that is only forbidden characters
+        assert_eq!(safe_name("???"), "attachment");
+    }
+
+    #[test]
+    fn programs_and_scripts_are_never_opened() {
+        for n in ["setup.EXE", "run.sh", "x.AppImage", "evil.desktop", "a.ps1", "a.bat", "a.cmd", "a.msi", "a.hta", "a.lnk", "a.jar", "a.vbs", "a.reg",
+            "a.scr", "a.iso", "a.deb", "a.py", "evil.exe.", "evil.exe ", "invoice\u{202E}fdp.exe", "photo.jpg.exe", "noextension", ".bashrc", "Makefile"] {
+            assert!(risky(n), "{n}");
+        }
+        for n in ["report.pdf", "photo.jpg", "notes.txt", "sheet.xlsx", "slides.pptx", "archive.zip", "a.docx", "my.sh.txt"] {
+            assert!(!risky(n), "{n}");
+        }
+    }
+
+    #[test]
+    fn saved_and_opened_files_stay_in_their_folder() {
+        let dir = std::env::temp_dir().join(format!("gm-place-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let folder = dunce::canonicalize(&dir).unwrap();
+        for (raw, _) in HOSTILE {
+            let p = place(&dir, raw).unwrap();
+            assert_eq!(p.parent(), Some(folder.as_path()), "{raw:?} escaped: {}", p.display());
+            write_file(&p, b"x").unwrap();
+            assert_eq!(std::fs::read(&p).unwrap(), b"x");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "private and never executable: {raw:?}");
+            }
+            std::fs::remove_file(&p).unwrap();
+        }
+        // nothing was written outside the folder
+        assert!(std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).all(|e| e.file_name() == "sub"));
+        // an existing folder or link with that name is not written through
+        assert!(place(&dir, "sub").is_err());
+        #[cfg(unix)]
+        {
+            let outside = std::env::temp_dir().join(format!("gm-outside-{}", uuid::Uuid::new_v4()));
+            std::fs::write(&outside, b"keep").unwrap();
+            std::os::unix::fs::symlink(&outside, dir.join("link.txt")).unwrap();
+            assert!(place(&dir, "link.txt").is_err());
+            assert!(write_file(&dir.join("link.txt"), b"evil").is_err(), "O_NOFOLLOW");
+            assert_eq!(std::fs::read(&outside).unwrap(), b"keep");
+            let _ = std::fs::remove_file(outside);
+        }
+        assert!(place(&dir.join("missing"), "a.txt").is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -306,8 +515,17 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"%PDF-1.4 hello");
         assert!(path.starts_with(temp_root()));
         let dest = tmp.join("saved.pdf");
-        save(&list[0].id, dest.to_str().unwrap()).await.unwrap();
+        assert_eq!(save(&list[0].id, dest.to_str().unwrap()).await.unwrap(), dunce::canonicalize(&tmp).unwrap().join("saved.pdf"));
         assert_eq!(std::fs::read(dest).unwrap(), b"%PDF-1.4 hello");
+        // a hostile name in the save path still lands in the chosen folder
+        let written = save(&list[0].id, tmp.join("evil\u{202E}fdp.sh:x").to_str().unwrap()).await.unwrap();
+        assert_eq!(written, dunce::canonicalize(&tmp).unwrap().join("evilfdp.sh_x"));
+        for bad in [tmp.join("..").join("up.pdf"), tmp.join("sub").join("..").join("..").join("up.pdf")] {
+            assert!(save(&list[0].id, bad.to_str().unwrap()).await.is_err(), "{}", bad.display());
+        }
+        assert!(!tmp.parent().unwrap().join("up.pdf").exists());
+        assert!(save(&list[0].id, "").await.is_err());
+        assert!(save(&list[0].id, "relative.pdf").await.is_err(), "a folder must be chosen");
         clear_temp();
         assert!(!path.exists());
 

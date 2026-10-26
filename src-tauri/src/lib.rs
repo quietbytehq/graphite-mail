@@ -371,8 +371,8 @@ async fn open_attachment(app: tauri::AppHandle, id: String) -> CmdResult<()> {
 }
 
 #[tauri::command]
-async fn save_attachment(id: String, dest: String) -> CmdResult<()> {
-    attachments::save(&id, &dest).await.map_err(|e| e.to_string())
+async fn save_attachment(id: String, dest: String) -> CmdResult<String> {
+    attachments::save(&id, &dest).await.map(|p| p.to_string_lossy().into_owned()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

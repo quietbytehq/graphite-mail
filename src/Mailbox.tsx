@@ -731,7 +731,7 @@ export default function Mailbox({ account: _first, onSignOut }: { account: Accou
                       <Icon name="paperclip" size={13} /> <span className="attname">{a.name}</span> <span className="muted">{attBusy === a.id ? "downloading…" : fmtBytes(a.size)}</span>
                     </button>
                     <button className="attsave" title="Save a copy…" disabled={attBusy === a.id}
-                      onClick={async () => { const dest = await saveDialog({ defaultPath: a.name, title: "Save attachment" }); if (!dest) return; setAttBusy(a.id); try { await invoke("save_attachment", { id: a.id, dest }); flash("Saved"); } catch (e) { flash(String(e)); } finally { setAttBusy(""); } }}>Save</button>
+                      onClick={async () => { const dest = await saveDialog({ defaultPath: a.name, title: "Save attachment" }); if (!dest) return; setAttBusy(a.id); try { const at = await invoke<string>("save_attachment", { id: a.id, dest }); flash(at ? `Saved as ${at}` : "Saved"); } catch (e) { flash(String(e)); } finally { setAttBusy(""); } }}>Save</button>
                   </span>
                 ))}
               </div>

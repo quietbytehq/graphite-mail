@@ -668,11 +668,14 @@ pub fn run() {
             // The main window loads in the background, hidden, while the splash animation plays.
             let main = tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
                 .visible(false)
+                // Developer tools only in debug builds (release builds also lack the "devtools" feature).
+                .devtools(cfg!(debug_assertions))
                 .on_navigation(move |url| allow_navigation(&handle, url))
                 .on_new_window(move |url, _features| new_window_request(&handle2, url))
                 .build()?;
             match tauri::WebviewWindowBuilder::new(app, "splash", tauri::WebviewUrl::App("splash.html".into()))
                 // The splash only ever shows its own page: no links, no other pages, no windows.
+                .devtools(cfg!(debug_assertions))
                 .on_navigation(|url| links::classify(url, cfg!(dev)) == links::Action::Allow)
                 .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
                 .title("Graphite Mail")

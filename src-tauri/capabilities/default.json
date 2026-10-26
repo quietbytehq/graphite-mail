@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Only what the main window's web code actually calls: event listening, its own window buttons, and the file dialogs. (Opening links and notifications are done by the Rust side.)",
+  "description": "Only what the main window's web code actually calls: event listening, its own window buttons, and the file and question dialogs (ask() uses the message command). No webview/window creation, always-on-top, notification, tray, opener or devtools permissions, and no deny- entries: anything not listed is refused. (Opening links and notifications are done by the Rust side.)",
   "windows": [
     "main"
   ],
@@ -14,6 +14,6 @@
     "core:window:allow-start-dragging",
     "dialog:allow-open",
     "dialog:allow-save",
-    "dialog:allow-ask"
+    "dialog:allow-message"
   ]
 }

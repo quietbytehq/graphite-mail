@@ -123,8 +123,11 @@ fn needed_permissions() -> std::collections::BTreeSet<String> {
         for line in t.lines().filter(|l| l.contains("from \"@tauri-apps/plugin-dialog\"")) {
             let names = line.split('{').nth(1).and_then(|x| x.split('}').next()).unwrap_or_default();
             for n in names.split(',').map(|n| n.trim().split_whitespace().next().unwrap_or_default()) {
-                if matches!(n, "ask" | "open" | "save" | "confirm" | "message") {
-                    need.insert(format!("dialog:allow-{n}"));
+                match n {
+                    "open" | "save" => { need.insert(format!("dialog:allow-{n}")); }
+                    // ask() and confirm() are the message command (dialog:allow-ask is only a deprecated alias).
+                    "ask" | "confirm" | "message" => { need.insert("dialog:allow-message".to_string()); }
+                    _ => {}
                 }
             }
         }
@@ -149,6 +152,35 @@ fn window_permissions_are_exactly_what_the_ui_uses() {
             assert!(!t.contains(plugin), "{} imports {plugin}, which would need a permission", f.display());
         }
     }
+}
+
+/// The permissions an external review asked to remove must never come back, and nothing may be both allowed and denied.
+#[test]
+fn no_unused_or_conflicting_permissions() {
+    let cap = json_file("capabilities/default.json");
+    let granted: Vec<String> = cap["permissions"].as_array().unwrap().iter().map(|p| p.as_str().unwrap().to_string()).collect();
+    for banned in [
+        "create-webview", "create-webview-window", "set-always-on-top", "internal-toggle-devtools", "reveal-item-in-dir",
+        "notification:", "tray:", "opener:", "shell:", "fs:", "http:", "core:webview:", "core:app:", "core:path:", "core:menu:",
+        "core:image:", "core:resources:", "core:tray:", "allow-emit", "allow-ask", "allow-confirm", ":default",
+    ] {
+        assert!(!granted.iter().any(|p| p.contains(banned)), "{banned} must not be granted: {granted:?}");
+    }
+    for p in &granted {
+        let deny = p.replacen("allow-", "deny-", 1);
+        assert!(!granted.contains(&deny), "{p} conflicts with {deny}");
+    }
+    // Devtools: off in release builds (no "devtools" feature) and switched off on every window outside debug builds.
+    let cargo = std::fs::read_to_string(root().join("Cargo.toml")).unwrap();
+    let tauri_line = cargo.lines().find(|l| l.starts_with("tauri =")).unwrap();
+    assert!(!tauri_line.contains("devtools"), "{tauri_line}");
+    let lib = std::fs::read_to_string(root().join("src/lib.rs")).unwrap();
+    assert_eq!(lib.matches(".devtools(cfg!(debug_assertions))").count(), 2);
+    let conf = json_file("tauri.conf.json");
+    for w in conf["app"]["windows"].as_array().unwrap() {
+        assert_ne!(w["devtools"], serde_json::json!(true));
+    }
+    assert!(conf["app"]["withGlobalTauri"].as_bool() != Some(true), "no global __TAURI__ object for injected code to use");
 }
 
 #[test]

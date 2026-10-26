@@ -497,12 +497,12 @@ mod tests {
     #[test]
     fn in_the_snap_the_default_data_folder_is_the_common_folder_that_survives_updates() {
         use std::path::PathBuf;
-        let local = Some(PathBuf::from("/home/ann/.local/share"));
-        assert_eq!(super::default_data_dir_in(None, local.clone()), PathBuf::from("/home/ann/.local/share/graphite-mail").to_string_lossy());
-        assert_eq!(
-            super::default_data_dir_in(Some(PathBuf::from("/home/ann/snap/graphite-mail/common")), local.clone()),
-            PathBuf::from("/home/ann/snap/graphite-mail/common/graphite-mail").to_string_lossy()
-        );
+        // Absolute on Windows too (a bare "/home/..." has no drive letter there), and joined the way the code joins.
+        let local_dir = std::env::temp_dir().join("ann").join(".local").join("share");
+        let common = std::env::temp_dir().join("ann").join("snap").join("graphite-mail").join("common");
+        let local = Some(local_dir.clone());
+        assert_eq!(super::default_data_dir_in(None, local.clone()), local_dir.join("graphite-mail").to_string_lossy());
+        assert_eq!(super::default_data_dir_in(Some(common.clone()), local.clone()), common.join("graphite-mail").to_string_lossy());
         // an empty or relative SNAP_USER_COMMON is ignored
         assert_eq!(super::default_data_dir_in(Some(PathBuf::from("")), local.clone()), super::default_data_dir_in(None, local.clone()));
         assert_eq!(super::default_data_dir_in(Some(PathBuf::from("common")), local.clone()), super::default_data_dir_in(None, local));

@@ -191,3 +191,56 @@ describe("Sidebar tiles and cards", () => {
     expect(cal.getAttribute("aria-pressed")).toBe("false");
   });
 });
+
+describe("Message bodies", () => {
+  const inbox = { id: "f1", remote_id: "r1", name: "Inbox", well_known: "inbox", unread: 0, total: 1, parent_remote_id: null, account_email: "me@corp.com" };
+  const msg = { id: "m1", subject: "Newsletter", sender_name: "Shop", sender_address: "news@shop.example", snippet: "", received_at: 1, is_read: true, is_flagged: false, has_attachments: false, account_email: "me@corp.com" };
+  const body = '<p>Sale!</p><img src="https://track.example/p.gif" width="1" height="1"><img src="data:image/png;base64,AAAA" alt="logo"><a href="javascript:alert(1)">x</a><script>alert(1)</script>';
+  const frame = () => document.querySelector(".reader iframe") as HTMLIFrameElement;
+
+  async function openMessage(trusted: { value: boolean }) {
+    const calls: [string, unknown][] = [];
+    backend([{ email: "me@corp.com", display_name: "Me", provider: "microsoft" }], {
+      list_folders: () => [inbox], list_messages: () => [msg],
+      get_message: () => ({ ...msg, to_json: null, cc_json: null, body_html: body }),
+      image_sender_allowed: (a) => { calls.push(["image_sender_allowed", a]); return trusted.value; },
+      set_image_sender: (a) => { calls.push(["set_image_sender", a]); trusted.value = (a as { allowed: boolean }).allowed; return null; },
+    });
+    render(<Mailbox account={{ email: "me@corp.com", display_name: "Me" }} onSignOut={() => {}} />);
+    fireEvent.click(await screen.findByText("Newsletter", { selector: ".subj" }));
+    await waitFor(() => expect(frame()).toBeTruthy());
+    return calls;
+  }
+
+  it("shows the body in a frame without scripts or the app's origin, and blocks remote images until asked", async () => {
+    await openMessage({ value: false });
+    const f = frame();
+    expect(f.getAttribute("sandbox")).toBe("allow-popups");
+    const doc = f.getAttribute("srcdoc")!;
+    expect(doc).not.toMatch(/track\.example|<script|javascript:/);
+    expect(doc).toContain("data:image/png;base64,AAAA"); // inline pictures still show
+    expect(screen.getByText(/Images from the internet were blocked/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Load images" }));
+    await waitFor(() => expect(frame().getAttribute("srcdoc")).toContain("https://track.example/p.gif"));
+    expect(frame().getAttribute("srcdoc")).not.toMatch(/<script|javascript:/);
+    expect(screen.queryByText(/Images from the internet were blocked/)).toBeNull();
+  });
+
+  it("can always load images from one sender, and stop again", async () => {
+    const trusted = { value: false };
+    const calls = await openMessage(trusted);
+    expect(calls).toContainEqual(["image_sender_allowed", { address: "news@shop.example" }]);
+    fireEvent.click(screen.getByRole("button", { name: "Always load from news@shop.example" }));
+    await waitFor(() => expect(frame().getAttribute("srcdoc")).toContain("https://track.example/p.gif"));
+    expect(calls).toContainEqual(["set_image_sender", { address: "news@shop.example", allowed: true }]);
+    fireEvent.click(await screen.findByRole("button", { name: "Stop loading them" }));
+    await waitFor(() => expect(frame().getAttribute("srcdoc")).not.toContain("track.example"));
+    expect(calls).toContainEqual(["set_image_sender", { address: "news@shop.example", allowed: false }]);
+  });
+
+  it("loads a trusted sender's images straight away", async () => {
+    await openMessage({ value: true });
+    await waitFor(() => expect(frame().getAttribute("srcdoc")).toContain("https://track.example/p.gif"));
+    expect(screen.getByText(/are always loaded/)).toBeTruthy();
+  });
+});

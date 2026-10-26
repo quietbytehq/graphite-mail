@@ -19,6 +19,46 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const PROVIDER: &str = "imap";
+
+/// Where an "Other email (IMAP)" account's servers are. Absent for Gmail accounts (Gmail's servers are built in).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct ImapSettings {
+    /// "yahoo", "icloud", "zoho", "fastmail", "aol" or "custom": only for the label in Settings.
+    #[serde(default)]
+    pub preset: String,
+    pub imap_host: String,
+    pub imap_port: u16,
+    /// "tls" (implicit, usually 993/465), "starttls" (143/587) or "none" (plain; tests only, never advised).
+    pub imap_tls: String,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub smtp_tls: String,
+    /// Sign-in name when it isn't the address (most providers: the full address).
+    #[serde(default)]
+    pub username: String,
+}
+
+impl ImapSettings {
+    /// Refuses settings that can't work before any connection is tried.
+    pub fn check(&self) -> Result<()> {
+        for (what, host) in [("IMAP", &self.imap_host), ("SMTP", &self.smtp_host)] {
+            let h = host.trim();
+            if h.is_empty() || h.contains(char::is_whitespace) || h.contains('/') || h.contains(':') {
+                bail!("Enter the {what} server's host name, for example imap.example.com.");
+            }
+        }
+        if self.imap_port == 0 || self.smtp_port == 0 {
+            bail!("Ports go from 1 to 65535.");
+        }
+        for t in [&self.imap_tls, &self.smtp_tls] {
+            if !matches!(t.as_str(), "tls" | "starttls" | "none") {
+                bail!("The security setting must be TLS, STARTTLS or none.");
+            }
+        }
+        Ok(())
+    }
+}
+
 const IMAP_HOST: &str = "imap.gmail.com";
 const IMAP_PORT: u16 = 993;
 const SMTP_HOST: &str = "smtp.gmail.com";
@@ -104,8 +144,14 @@ fn out_of_reach(host: &str, detail: impl fmt::Display) -> anyhow::Error {
 }
 
 /// Turns Gmail's answer to a refused sign-in into advice. `text` must already be redacted.
-fn login_problem(email: &str, text: &str) -> anyhow::Error {
+fn login_problem(email: &str, text: &str, gmail: bool) -> anyhow::Error {
     let t = text.to_ascii_lowercase();
+    if !gmail {
+        return refused(401, format!(
+            "The mail server didn't accept the sign-in for {email}. Check the user name and the app password (most providers want an app \
+             password made in your account's security settings, not your normal password), and that IMAP is switched on for the account."
+        ));
+    }
     let msg = if t.contains("application-specific password") || t.contains("web login required") || t.contains("webalert") {
         format!(
             "Google wants an app password for {email}, not your normal password. App passwords need 2-Step Verification: \
@@ -123,53 +169,109 @@ fn login_problem(email: &str, text: &str) -> anyhow::Error {
 }
 
 fn smtp_problem(email: &str, pw: &Secret, e: lettre::transport::smtp::Error) -> anyhow::Error {
+    smtp_problem_with(email, pw, e, settings_of(email).as_ref())
+}
+
+fn smtp_problem_with(email: &str, pw: &Secret, e: lettre::transport::smtp::Error, settings: Option<&ImapSettings>) -> anyhow::Error {
     let text = pw.redact(&e.to_string());
     let code = e.status().map(|c| c.to_string()).unwrap_or_default();
-    if text.contains("5.7.9") || text.to_ascii_lowercase().contains("application-specific") {
-        return login_problem(email, "application-specific password required");
+    let gmail = settings.is_none();
+    let who = if gmail { "Gmail" } else { "The mail server" };
+    if gmail && (text.contains("5.7.9") || text.to_ascii_lowercase().contains("application-specific")) {
+        return login_problem(email, "application-specific password required", true);
     }
     if code == "535" || code == "534" || text.contains("5.7.8") {
-        return refused(401, format!("Gmail didn't accept the app password for sending from {email}. Create a new app password at myaccount.google.com/apppasswords and add the account again."));
+        return refused(401, if gmail {
+            format!("Gmail didn't accept the app password for sending from {email}. Create a new app password at myaccount.google.com/apppasswords and add the account again.")
+        } else {
+            format!("{who} didn't accept the sign-in for sending from {email}. Check the SMTP user name and the app password, and add the account again.")
+        });
     }
     if e.is_permanent() {
-        return refused(400, format!("Gmail refused to send this message: {text}"));
+        return refused(400, format!("{who} refused to send this message: {text}"));
     }
     if e.is_transient() {
-        return refused(503, format!("Gmail can't take this message right now; it will be sent later. ({text})"));
+        return refused(503, format!("{who} can't take this message right now; it will be sent later. ({text})"));
     }
-    out_of_reach(&smtp_server().host, text)
+    out_of_reach(&smtp_server_with(email, settings).host, text)
 }
 
 // ---------------------------------------------------------------- servers
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Tls {
+    /// TLS from the first byte (IMAP 993, SMTP 465).
+    Implicit,
+    /// Plain connection upgraded with STARTTLS (IMAP 143, SMTP 587).
+    StartTls,
+    /// No encryption (pretend servers in tests; a custom server on a trusted network).
+    Plain,
+}
+
+impl Tls {
+    fn parse(s: &str) -> Tls {
+        match s {
+            "starttls" => Tls::StartTls,
+            "none" => Tls::Plain,
+            _ => Tls::Implicit,
+        }
+    }
+}
+
 struct Server {
     host: String,
     port: u16,
-    tls: bool,
+    tls: Tls,
+    /// The sign-in name (the address unless the account says otherwise).
+    user: String,
 }
 
-fn imap_server() -> Server {
+/// The servers of an account: its own settings ("Other email"), else Gmail's.
+fn settings_of(email: &str) -> Option<ImapSettings> {
+    auth::accounts().into_iter().find(|a| a.email.eq_ignore_ascii_case(email)).and_then(|a| a.imap)
+}
+
+fn user_of(email: &str, s: Option<&ImapSettings>) -> String {
+    s.map(|s| s.username.trim().to_string()).filter(|u| !u.is_empty()).unwrap_or_else(|| email.to_string())
+}
+
+/// Servers for an account being added (its settings aren't stored yet) or already stored.
+fn imap_server_with(email: &str, s: Option<&ImapSettings>) -> Server {
+    if let Some(s) = s {
+        return Server { host: s.imap_host.trim().into(), port: s.imap_port, tls: Tls::parse(&s.imap_tls), user: user_of(email, Some(s)) };
+    }
     #[cfg(test)]
-    if let Some(s) = test_server("GM_TEST_IMAP") {
+    if let Some(s) = test_server("GM_TEST_IMAP", email) {
         return s;
     }
-    Server { host: IMAP_HOST.into(), port: IMAP_PORT, tls: true }
+    Server { host: IMAP_HOST.into(), port: IMAP_PORT, tls: Tls::Implicit, user: email.into() }
 }
 
-fn smtp_server() -> Server {
+fn smtp_server_with(email: &str, s: Option<&ImapSettings>) -> Server {
+    if let Some(s) = s {
+        return Server { host: s.smtp_host.trim().into(), port: s.smtp_port, tls: Tls::parse(&s.smtp_tls), user: user_of(email, Some(s)) };
+    }
     #[cfg(test)]
-    if let Some(s) = test_server("GM_TEST_SMTP") {
+    if let Some(s) = test_server("GM_TEST_SMTP", email) {
         return s;
     }
-    Server { host: SMTP_HOST.into(), port: SMTP_PORT, tls: true }
+    Server { host: SMTP_HOST.into(), port: SMTP_PORT, tls: Tls::Implicit, user: email.into() }
 }
 
-/// Tests talk to pretend servers on 127.0.0.1 without TLS.
+fn imap_server(email: &str) -> Server {
+    imap_server_with(email, settings_of(email).as_ref())
+}
+
+fn smtp_server(email: &str) -> Server {
+    smtp_server_with(email, settings_of(email).as_ref())
+}
+
+/// Tests talk to pretend Gmail servers on 127.0.0.1 without TLS.
 #[cfg(test)]
-fn test_server(var: &str) -> Option<Server> {
+fn test_server(var: &str, email: &str) -> Option<Server> {
     let a = std::env::var(var).ok()?;
     let (h, p) = a.rsplit_once(':')?;
-    Some(Server { host: h.into(), port: p.parse().ok()?, tls: false })
+    Some(Server { host: h.into(), port: p.parse().ok()?, tls: Tls::Plain, user: email.into() })
 }
 
 // ---------------------------------------------------------------- IMAP connections
@@ -205,8 +307,8 @@ async fn open_stream(srv: &Server) -> Result<Box<dyn Io>> {
         .map_err(|e| out_of_reach(&srv.host, e))?;
     // Commands are small and each waits for its answer: without this, every command can sit ~40 ms in the kernel.
     let _ = tcp.set_nodelay(true);
-    if !srv.tls {
-        return Ok(Box::new(tcp));
+    if srv.tls != Tls::Implicit {
+        return Ok(Box::new(tcp)); // plain, or upgraded with STARTTLS by the caller
     }
     let name = tokio_rustls::rustls::pki_types::ServerName::try_from(srv.host.clone())?;
     let tls = tokio::time::timeout(CONNECT_TIMEOUT, tls_connector().connect(name, tcp))
@@ -229,16 +331,33 @@ struct Conn {
 }
 
 async fn login(email: &str, pw: &Secret) -> Result<Conn> {
-    let srv = imap_server();
+    login_to(email, pw, settings_of(email).as_ref()).await
+}
+
+/// Signs in to the IMAP server (`settings` = the account's own servers, None = Gmail).
+async fn login_to(email: &str, pw: &Secret, settings: Option<&ImapSettings>) -> Result<Conn> {
+    let srv = imap_server_with(email, settings);
+    let gmail_account = settings.is_none();
     let mut client = async_imap::Client::new(open_stream(&srv).await?);
     match tokio::time::timeout(CONNECT_TIMEOUT, client.read_response()).await {
         Ok(Ok(Some(_))) => {}
         _ => return Err(out_of_reach(&srv.host, "the server didn't greet us")),
     }
-    let mut s = match tokio::time::timeout(NET_TIMEOUT, client.login(email, pw.expose())).await {
+    if srv.tls == Tls::StartTls {
+        // Upgrade the plain connection: the server keeps the session, so no second greeting is read.
+        tm(client.run_command_and_check_ok("STARTTLS", None)).await.map_err(|e| out_of_reach(&srv.host, format!("STARTTLS refused: {e}")))?;
+        let plain = client.into_inner();
+        let name = tokio_rustls::rustls::pki_types::ServerName::try_from(srv.host.clone())?;
+        let tls = tokio::time::timeout(CONNECT_TIMEOUT, tls_connector().connect(name, plain))
+            .await
+            .map_err(|_| out_of_reach(&srv.host, "secure connection timed out"))?
+            .map_err(|e| out_of_reach(&srv.host, e))?;
+        client = async_imap::Client::new(Box::new(tls));
+    }
+    let mut s = match tokio::time::timeout(NET_TIMEOUT, client.login(&srv.user, pw.expose())).await {
         Err(_) => return Err(out_of_reach(&srv.host, "sign-in timed out")),
         Ok(Ok(s)) => s,
-        Ok(Err((async_imap::error::Error::No(t) | async_imap::error::Error::Bad(t), _))) => return Err(login_problem(email, &pw.redact(&t))),
+        Ok(Err((async_imap::error::Error::No(t) | async_imap::error::Error::Bad(t), _))) => return Err(login_problem(email, &pw.redact(&t), gmail_account)),
         Ok(Err((e, _))) => return Err(out_of_reach(&srv.host, pw.redact(&e.to_string()))),
     };
     let caps = tm(s.capabilities()).await?;
@@ -364,18 +483,23 @@ pub fn forget(email: &str) {
 // ---------------------------------------------------------------- adding an account
 
 /// Checks the address and app password against Gmail's IMAP and SMTP servers, then saves the account.
-pub async fn add_account(email: &str, app_password: &str) -> Result<auth::Account> {
+/// Adds a Gmail (`settings` = None) or other IMAP/SMTP account (`settings` = its servers) with an app password.
+pub async fn add_account(email: &str, app_password: &str, settings: Option<ImapSettings>) -> Result<auth::Account> {
     let email = email.trim().to_lowercase();
+    let gmail = settings.is_none();
     let at = email.find('@').unwrap_or(0);
     if at == 0 || at == email.len() - 1 || email.contains(char::is_whitespace) || !email[at + 1..].contains('.') {
-        bail!("Enter your full Gmail address, for example name@gmail.com.");
+        bail!(if gmail { "Enter your full Gmail address, for example name@gmail.com." } else { "Enter your full email address, for example name@example.com." });
     }
     let pw = Secret::new(app_password);
     if pw.expose().is_empty() {
-        bail!("Paste the app password Google showed you.");
+        bail!(if gmail { "Paste the app password Google showed you." } else { "Enter the app password for this account." });
     }
-    if pw.expose().chars().count() != 16 || !pw.expose().chars().all(|c| c.is_ascii_alphanumeric()) {
+    if gmail && (pw.expose().chars().count() != 16 || !pw.expose().chars().all(|c| c.is_ascii_alphanumeric())) {
         bail!("A Google app password has 16 letters (Google shows them as four groups of four). Copy it again from myaccount.google.com/apppasswords.");
+    }
+    if let Some(s) = &settings {
+        s.check()?;
     }
     if let Some(other) = auth::accounts().into_iter().find(|a| a.email.eq_ignore_ascii_case(&email)) {
         if other.provider != PROVIDER {
@@ -384,13 +508,14 @@ pub async fn add_account(email: &str, app_password: &str) -> Result<auth::Accoun
     }
 
     // 1. Reading mail.
-    let mut c = login(&email, &pw).await?;
+    let mut c = login_to(&email, &pw, settings.as_ref()).await?;
     let _ = tm(c.s.logout()).await;
     // 2. Sending mail.
-    match tokio::time::timeout(NET_TIMEOUT, transport(&email, &pw)?.test_connection()).await {
-        Err(_) => return Err(out_of_reach(&smtp_server().host, "timed out")),
-        Ok(Err(e)) => return Err(smtp_problem(&email, &pw, e)),
-        Ok(Ok(false)) => return Err(out_of_reach(&smtp_server().host, "the connection closed")),
+    let smtp = smtp_server_with(&email, settings.as_ref());
+    match tokio::time::timeout(NET_TIMEOUT, transport_to(&email, &pw, settings.as_ref())?.test_connection()).await {
+        Err(_) => return Err(out_of_reach(&smtp.host, "timed out")),
+        Ok(Err(e)) => return Err(smtp_problem_with(&email, &pw, e, settings.as_ref())),
+        Ok(Ok(false)) => return Err(out_of_reach(&smtp.host, "the connection closed")),
         Ok(Ok(true)) => {}
     }
     // 3. Saving: the password goes to the keyring only.
@@ -401,6 +526,8 @@ pub async fn add_account(email: &str, app_password: &str) -> Result<auth::Accoun
         provider: PROVIDER.into(),
         rules: true, // rules for this account are kept on this computer: no extra permission to ask for
         contacts: false,
+        personal: false,
+        imap: settings,
     };
     if let Err(e) = auth::remember_account(&acc) {
         auth::forget_app_password(&email);
@@ -494,6 +621,20 @@ fn special_use(name: &str, attrs: &[NameAttribute]) -> Option<&'static str> {
     })
 }
 
+/// Non-Gmail servers that don't say what a folder is for (no SPECIAL-USE): the usual names, in a few spellings.
+/// Never used for Gmail (its folders all carry attributes) and never for a folder that has an attribute.
+pub(crate) fn role_by_name(leaf: &str) -> Option<&'static str> {
+    let n = decode_name(leaf).trim().to_ascii_lowercase();
+    Some(match n.as_str() {
+        "sent" | "sent items" | "sent messages" | "sent mail" | "sent-mail" | "sent_items" | "outbox-sent" => "sentitems",
+        "drafts" | "draft" => "drafts",
+        "trash" | "deleted" | "deleted items" | "deleted messages" | "bin" | "recycle bin" | "deleted_items" => "deleteditems",
+        "junk" | "junk e-mail" | "junk email" | "junk mail" | "spam" | "bulk mail" | "bulk" => "junkemail",
+        "archive" | "archives" | "all mail" => "archive",
+        _ => return None,
+    })
+}
+
 async fn list_boxes(c: &mut Conn) -> Result<(Vec<Mailbox>, String)> {
     let s = &mut c.s;
     let names = tm(async move {
@@ -502,6 +643,7 @@ async fn list_boxes(c: &mut Conn) -> Result<(Vec<Mailbox>, String)> {
     })
     .await?;
     c.drain();
+    let gmail = c.gmail;
     let mut delim = "/".to_string();
     let mut found: Vec<(String, Option<&'static str>)> = vec![];
     for n in &names {
@@ -510,7 +652,12 @@ async fn list_boxes(c: &mut Conn) -> Result<(Vec<Mailbox>, String)> {
         }
         let unusable = n.attributes().iter().any(|a| matches!(a, NameAttribute::NoSelect) || matches!(a, NameAttribute::Extension(x) if x.eq_ignore_ascii_case("\\NonExistent")));
         if !unusable {
-            found.push((n.name().to_string(), special_use(n.name(), n.attributes())));
+            let mut wk = special_use(n.name(), n.attributes());
+            if wk.is_none() && !gmail {
+                let leaf = n.delimiter().and_then(|d| n.name().rsplit(d).next()).unwrap_or(n.name());
+                wk = role_by_name(leaf);
+            }
+            found.push((n.name().to_string(), wk));
         }
     }
     let usable: HashSet<String> = found.iter().map(|(n, _)| n.clone()).collect();
@@ -1205,14 +1352,18 @@ async fn run(c: &mut Conn, op: &str, entity: &str, p: &Value) -> Result<()> {
 // ---------------------------------------------------------------- sending
 
 fn transport(email: &str, pw: &Secret) -> Result<lettre::AsyncSmtpTransport<lettre::Tokio1Executor>> {
+    transport_to(email, pw, settings_of(email).as_ref())
+}
+
+fn transport_to(email: &str, pw: &Secret, settings: Option<&ImapSettings>) -> Result<lettre::AsyncSmtpTransport<lettre::Tokio1Executor>> {
     use lettre::transport::smtp::authentication::Credentials;
-    let srv = smtp_server();
-    let builder = if srv.tls {
-        lettre::AsyncSmtpTransport::<lettre::Tokio1Executor>::relay(&srv.host)?.port(srv.port)
-    } else {
-        lettre::AsyncSmtpTransport::<lettre::Tokio1Executor>::builder_dangerous(&srv.host).port(srv.port)
+    let srv = smtp_server_with(email, settings);
+    let builder = match srv.tls {
+        Tls::Implicit => lettre::AsyncSmtpTransport::<lettre::Tokio1Executor>::relay(&srv.host)?.port(srv.port),
+        Tls::StartTls => lettre::AsyncSmtpTransport::<lettre::Tokio1Executor>::starttls_relay(&srv.host)?.port(srv.port),
+        Tls::Plain => lettre::AsyncSmtpTransport::<lettre::Tokio1Executor>::builder_dangerous(&srv.host).port(srv.port),
     };
-    Ok(builder.credentials(Credentials::new(email.to_string(), pw.expose().to_string())).timeout(Some(NET_TIMEOUT)).build())
+    Ok(builder.credentials(Credentials::new(srv.user, pw.expose().to_string())).timeout(Some(NET_TIMEOUT)).build())
 }
 
 async fn send(email: &str, entity: &str, p: &Value) -> Result<()> {

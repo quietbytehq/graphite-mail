@@ -484,6 +484,11 @@ fn granted(email: &str) -> bool {
     auth::accounts().iter().any(|a| a.email.eq_ignore_ascii_case(email) && a.contacts)
 }
 
+/// Personal Microsoft accounts (outlook.com, hotmail.com, live.com) have no organisation directory.
+fn is_personal(email: &str) -> bool {
+    auth::accounts().iter().any(|a| a.email.eq_ignore_ascii_case(email) && a.personal)
+}
+
 /// Records how one part went: "ok", "needs_consent" (not granted yet), "blocked" (granted, but the organisation
 /// refuses), or "error" (try again later).
 fn record(account_id: &str, email: &str, part: &str, r: &Result<usize>) -> Result<()> {
@@ -523,7 +528,8 @@ pub async fn sync_account(account_id: &str, force: bool) -> Result<()> {
         let r = sync_personal(account_id).await;
         record(account_id, &email, PERSONAL, &r)?;
     }
-    if force || due(account_id, DIRECTORY, DIRECTORY_EVERY) {
+    // A personal account has no directory: /users isn't available to it, so it is never asked for.
+    if !is_personal(&email) && (force || due(account_id, DIRECTORY, DIRECTORY_EVERY)) {
         let r = sync_directory(account_id).await;
         record(account_id, &email, DIRECTORY, &r)?;
     }
@@ -603,6 +609,8 @@ pub struct Group {
 pub struct AccountStatus {
     pub email: String,
     pub granted: bool,
+    /// A personal Microsoft account: no organisation directory (its `directory` status is "n/a").
+    pub personal_account: bool,
     /// "ok", "never" (not synced yet), "needs_consent", "blocked", "error" or "removed"
     pub directory: String,
     pub personal: String,
@@ -718,13 +726,19 @@ pub fn statuses(account: Option<&str>) -> Result<Vec<AccountStatus>> {
         .into_iter()
         .map(|(id, email)| {
             let paused = state_get(&id, "contacts:paused").is_some();
-            let status = |part: &str| if paused { "removed".to_string() } else { state_get(&id, &format!("contacts:{part}:status")).unwrap_or_else(|| "never".into()) };
+            let personal = is_personal(&email);
+            let status = |part: &str| {
+                if part == DIRECTORY && personal { "n/a".to_string() }
+                else if paused { "removed".to_string() }
+                else { state_get(&id, &format!("contacts:{part}:status")).unwrap_or_else(|| "never".into()) }
+            };
             let count = |source: &str| -> Result<i64> {
                 storage::with_db(|db| Ok(db.query_row("SELECT COUNT(*) FROM contacts WHERE account_id=?1 AND source=?2", params![id, source], |r| r.get(0))?))
             };
             let last = [DIRECTORY, PERSONAL].iter().filter_map(|p| state_get(&id, &format!("contacts:{p}:last")).and_then(|t| t.parse().ok())).max();
             Ok(AccountStatus {
                 granted: granted(&email),
+                personal_account: personal,
                 directory: status(DIRECTORY),
                 personal: status(PERSONAL),
                 directory_count: count(DIRECTORY)?,

@@ -13,6 +13,24 @@ use tokio::net::TcpListener;
 
 pub const CLIENT_ID: &str = "4fd86bd0-7f26-4941-87a6-e69aa7e982d0";
 const AUTHORITY: &str = "https://login.microsoftonline.com/common/oauth2/v2.0";
+
+/// The identity endpoints ("common": work, school and personal accounts alike); tests point it at a pretend server.
+fn authority() -> String {
+    #[cfg(test)]
+    if let Ok(a) = std::env::var("GM_TEST_AUTHORITY") {
+        return a;
+    }
+    AUTHORITY.to_string()
+}
+
+/// Microsoft Graph's base URL; tests point it at a pretend server.
+fn graph() -> String {
+    #[cfg(test)]
+    if let Ok(g) = std::env::var("GM_TEST_GRAPH") {
+        return g;
+    }
+    "https://graph.microsoft.com/v1.0".to_string()
+}
 const SCOPES: &str =
     "openid profile offline_access User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite";
 /// Extra permission needed to create Outlook mail rules; asked for only when the user turns rules on.
@@ -21,14 +39,56 @@ const RULES_SCOPE: &str = "MailboxSettings.ReadWrite";
 /// Extra permissions for the Contacts view, asked for only when the user grants them (Contacts → Grant access):
 /// personal contacts, the people they work with, and the organisation's directory (basic profiles).
 pub const CONTACTS_SCOPES: &str = "Contacts.Read People.Read User.ReadBasic.All";
+/// The same for personal Microsoft accounts (outlook.com, hotmail.com, live.com): no directory.
+pub const CONTACTS_SCOPES_PERSONAL: &str = "Contacts.Read People.Read";
 
-fn scopes(rules: bool, contacts: bool) -> String {
+/// Error codes Microsoft returns when an organisation's administrator must approve the app before anyone in it can
+/// sign in (AADSTS90094 / AADSTS90095 "admin consent required", AADSTS65001 "has not consented", or the authorize
+/// endpoint's `admin_consent_required` error). Personal accounts never produce these.
+pub fn admin_approval_needed(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    t.contains("aadsts90094") || t.contains("aadsts90095") || t.contains("aadsts65001") || t.contains("admin_consent_required")
+        || t.contains("need admin approval") || t.contains("needs admin approval")
+}
+
+/// Prefix of the error text the UI looks for to show the admin-approval explanation instead of a plain error.
+pub const ADMIN_APPROVAL_MARK: &str = "admin-approval:";
+
+pub const ADMIN_APPROVAL_MESSAGE: &str =
+    "Your organisation requires an administrator to approve Graphite Mail before you can sign in. \
+     This is done once for everyone: send the link to your IT admin, and sign in again after they have approved it.";
+
+/// Turns a sign-in failure caused by missing admin consent into a marked error the screens recognise; every other
+/// error is passed through unchanged. Never includes tokens or codes.
+fn mark_admin_approval(e: anyhow::Error) -> anyhow::Error {
+    if admin_approval_needed(&e.to_string()) { anyhow!("{ADMIN_APPROVAL_MARK}{ADMIN_APPROVAL_MESSAGE}") } else { e }
+}
+
+/// The link an administrator opens to approve Graphite Mail for their organisation (Microsoft's admin consent page
+/// for this app's client id). With the user's address the tenant is their domain, so the admin lands in the right
+/// directory; otherwise "organizations" lets them pick. It asks for the same permissions users would be asked for.
+pub fn admin_consent_url(email: Option<&str>) -> String {
+    let tenant = email
+        .and_then(|e| e.rsplit_once('@').map(|(_, d)| d.trim().to_lowercase()))
+        .filter(|d| !d.is_empty() && !["outlook.com", "hotmail.com", "live.com", "msn.com", "gmail.com"].contains(&d.as_str()))
+        .unwrap_or_else(|| "organizations".into());
+    let mut u = url::Url::parse(&format!("https://login.microsoftonline.com/{tenant}/v2.0/adminconsent")).expect("fixed URL");
+    u.query_pairs_mut()
+        .append_pair("client_id", CLIENT_ID)
+        .append_pair("scope", &scopes(true, true, false).split_whitespace().filter(|s| !matches!(*s, "openid" | "profile" | "offline_access")).map(|s| format!("https://graph.microsoft.com/{s}")).collect::<Vec<_>>().join(" "))
+        .append_pair("redirect_uri", "http://localhost")
+        .append_pair("state", "graphite-mail-admin-consent");
+    u.to_string()
+}
+
+fn scopes(rules: bool, contacts: bool, personal: bool) -> String {
     let mut s = SCOPES.to_string();
     if rules {
         s = format!("{s} {RULES_SCOPE}");
     }
     if contacts {
-        s = format!("{s} {CONTACTS_SCOPES}");
+        // Personal Microsoft accounts have no organisation directory: User.ReadBasic.All isn't a valid scope for them.
+        s = format!("{s} {}", if personal { CONTACTS_SCOPES_PERSONAL } else { CONTACTS_SCOPES });
     }
     s
 }
@@ -48,6 +108,13 @@ pub struct Account {
     /// Microsoft: the account has granted the Contacts permissions (CONTACTS_SCOPES).
     #[serde(default)]
     pub contacts: bool,
+    /// Microsoft: a personal account (outlook.com, hotmail.com, live.com) rather than an organisation's. These have no
+    /// directory, and their consent is never "admin approval".
+    #[serde(default)]
+    pub personal: bool,
+    /// IMAP accounts other than Gmail: where their servers are (Gmail accounts leave this empty).
+    #[serde(default)]
+    pub imap: Option<crate::imap::ImapSettings>,
 }
 
 fn default_provider() -> String {
@@ -77,6 +144,24 @@ struct TokenResponse {
     access_token: String,
     refresh_token: Option<String>,
     expires_in: u64,
+    /// Present because "openid" is requested; only its `tid` claim is read (to tell personal accounts apart).
+    #[serde(default)]
+    id_token: Option<String>,
+}
+
+/// The tenant id every personal Microsoft account (outlook.com, hotmail.com, live.com) belongs to.
+pub const PERSONAL_TENANT: &str = "9188040d-6c67-4c5b-b112-36a304b66dad";
+
+/// The `tid` claim of an id_token (its payload decoded, not verified: it only chooses which features to show).
+pub fn tenant_of_id_token(id_token: &str) -> Option<String> {
+    let payload = id_token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    v["tid"].as_str().map(String::from)
+}
+
+pub fn is_personal_tenant(tid: Option<&str>) -> bool {
+    tid.is_some_and(|t| t.eq_ignore_ascii_case(PERSONAL_TENANT))
 }
 
 struct Cached {
@@ -233,12 +318,15 @@ pub async fn sign_in(open: impl FnOnce(&str) -> Result<()>) -> Result<Account> {
 
 /// Sign-in that can also ask for the mail-rules permission, and pre-select an account with `hint`.
 pub async fn sign_in_with(open: impl FnOnce(&str) -> Result<()>, rules: bool, hint: Option<&str>) -> Result<Account> {
-    sign_in_scoped(open, rules, false, hint).await
+    let personal = hint.and_then(|h| accounts().into_iter().find(|a| a.email.eq_ignore_ascii_case(h))).is_some_and(|a| a.personal);
+    sign_in_scoped(open, rules, false, hint, personal).await
 }
 
-/// Sign-in that can ask for the rules and/or the Contacts permissions (kept once granted).
-pub async fn sign_in_scoped(open: impl FnOnce(&str) -> Result<()>, rules: bool, contacts: bool, hint: Option<&str>) -> Result<Account> {
-    let scope = scopes(rules, contacts);
+/// Sign-in that can ask for the rules and/or the Contacts permissions (kept once granted). `personal` is what is
+/// already known about the account (false on a first sign-in): it trims the scopes and keeps the admin-approval
+/// explanation away from personal accounts; the real answer comes from the token.
+pub async fn sign_in_scoped(open: impl FnOnce(&str) -> Result<()>, rules: bool, contacts: bool, hint: Option<&str>, personal: bool) -> Result<Account> {
+    let scope = scopes(rules, contacts, personal);
     let verifier = format!(
         "{}{}",
         uuid::Uuid::new_v4().simple(),
@@ -250,7 +338,7 @@ pub async fn sign_in_scoped(open: impl FnOnce(&str) -> Result<()>, rules: bool, 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let redirect = format!("http://localhost:{}", listener.local_addr()?.port());
 
-    let mut url = url::Url::parse(&format!("{AUTHORITY}/authorize"))?;
+    let mut url = url::Url::parse(&format!("{}/authorize", authority()))?;
     url.query_pairs_mut()
         .append_pair("client_id", CLIENT_ID)
         .append_pair("response_type", "code")
@@ -266,7 +354,8 @@ pub async fn sign_in_scoped(open: impl FnOnce(&str) -> Result<()>, rules: bool, 
     }
     open(url.as_str())?;
 
-    let code = wait_for_sign_in(&listener, &state).await?;
+    let explain = |e: anyhow::Error| if personal { e } else { mark_admin_approval(e) };
+    let code = wait_for_sign_in(&listener, &state).await.map_err(explain)?;
 
     let tok = token_request(&[
         ("client_id", CLIENT_ID),
@@ -276,11 +365,13 @@ pub async fn sign_in_scoped(open: impl FnOnce(&str) -> Result<()>, rules: bool, 
         ("code_verifier", &verifier),
         ("scope", &scope),
     ])
-    .await?;
+    .await
+    .map_err(explain)?;
 
     let mut account = fetch_me(&tok.access_token).await?;
     account.rules = rules;
     account.contacts = contacts;
+    account.personal = personal || is_personal_tenant(tok.id_token.as_deref().and_then(|t| tenant_of_id_token(t)).as_deref());
     remember(&account, tok.refresh_token.as_deref().ok_or(anyhow!("No refresh token"))?)?;
     cache_put(&account.email, &tok.access_token, tok.expires_in);
     Ok(account)
@@ -343,7 +434,7 @@ pub(crate) async fn wait_for_code(listener: &TcpListener, state: &str) -> Result
 
 async fn token_request(form: &[(&str, &str)]) -> Result<TokenResponse> {
     let resp = crate::http::client()
-        .post(format!("{AUTHORITY}/token"))
+        .post(format!("{}/token", authority()))
         .form(form)
         .send()
         .await?;
@@ -376,7 +467,7 @@ async fn fetch_me(token: &str) -> Result<Account> {
         user_principal_name: String,
     }
     let me: Me = crate::http::client()
-        .get("https://graph.microsoft.com/v1.0/me")
+        .get(format!("{}/me", graph()))
         .bearer_auth(token)
         .send()
         .await?
@@ -389,6 +480,8 @@ async fn fetch_me(token: &str) -> Result<Account> {
         provider: "microsoft".into(),
         rules: false,
         contacts: false,
+        personal: false,
+        imap: None,
     })
 }
 
@@ -410,17 +503,17 @@ pub async fn access_token() -> Result<String> {
         _ => {}
     }
     let rt = refresh_token_for(&email)?;
-    let (rules, contacts) = acc.as_ref().map_or((false, false), |a| (a.rules, a.contacts));
+    let (rules, contacts, personal) = acc.as_ref().map_or((false, false, false), |a| (a.rules, a.contacts, a.personal));
     let refresh = |scope: String| {
         let rt = rt.clone();
         async move { token_request(&[("client_id", CLIENT_ID), ("grant_type", "refresh_token"), ("refresh_token", &rt), ("scope", &scope)]).await }
     };
-    let tok = match refresh(scopes(rules, contacts)).await {
+    let tok = match refresh(scopes(rules, contacts, personal)).await {
         Ok(t) => t,
         // The Contacts permissions were withdrawn (by the user or an administrator): mail and calendar must keep
         // working, so sign in without them and let the Contacts view ask again.
         Err(_) if contacts => {
-            let t = refresh(scopes(rules, false)).await.map_err(|e| anyhow!("{email}: {e}"))?;
+            let t = refresh(scopes(rules, false, personal)).await.map_err(|e| anyhow!("{email}: {e}"))?;
             let _ = drop_contacts_permission(&email);
             t
         }
@@ -467,6 +560,53 @@ pub fn sign_out() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
+
+    #[test]
+    fn admin_approval_is_recognised_from_microsofts_error_texts() {
+        for t in [
+            "AADSTS90094: The grant requires admin permission.",
+            "aadsts90095: Admin consent is required for the permissions requested.",
+            "AADSTS65001: The user or administrator has not consented to use the application with ID '4fd8…'. Send an interactive authorization request for this user and resource.",
+            "admin_consent_required",
+            "Need admin approval",
+        ] {
+            assert!(super::admin_approval_needed(t), "{t}");
+        }
+        for t in ["AADSTS65004: User declined to consent to access the app.", "AADSTS50058: A silent sign-in request was sent but no user is signed in.", "Sign-in was cancelled.", "invalid_grant"] {
+            assert!(!super::admin_approval_needed(t), "{t}");
+        }
+        let e = super::mark_admin_approval(anyhow::anyhow!("Microsoft sign-in failed: AADSTS90094: The grant requires admin permission."));
+        assert!(e.to_string().starts_with(super::ADMIN_APPROVAL_MARK) && e.to_string().contains("IT admin"));
+        assert!(!e.to_string().contains("AADSTS"), "the user sees words, not codes");
+        assert_eq!(super::mark_admin_approval(anyhow::anyhow!("Sign-in was cancelled.")).to_string(), "Sign-in was cancelled.");
+    }
+
+    #[test]
+    fn the_admin_consent_link_names_the_tenant_the_app_and_the_permissions_but_no_secret() {
+        let u = super::admin_consent_url(Some("Ann@Contoso.com"));
+        assert!(u.starts_with("https://login.microsoftonline.com/contoso.com/v2.0/adminconsent?"), "{u}");
+        assert!(u.contains(&format!("client_id={}", super::CLIENT_ID)));
+        for p in ["Mail.ReadWrite", "Mail.Send", "Calendars.ReadWrite", "MailboxSettings.ReadWrite", "Contacts.Read", "People.Read", "User.ReadBasic.All"] {
+            assert!(u.contains(p), "{p} in {u}");
+        }
+        assert!(!u.to_lowercase().contains("secret") && !u.contains("openid"));
+        assert!(super::admin_consent_url(None).contains("/organizations/"));
+        assert!(super::admin_consent_url(Some("me@outlook.com")).contains("/organizations/"), "a personal domain is no tenant");
+    }
+
+    #[test]
+    fn personal_accounts_are_told_apart_by_the_token_tenant_and_get_no_directory_scope() {
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"tid":"9188040d-6c67-4c5b-b112-36a304b66dad","name":"Ann"}"#);
+        let tok = format!("eyJhbGciOiJub25lIn0.{claims}.sig");
+        assert!(super::is_personal_tenant(super::tenant_of_id_token(&tok).as_deref()));
+        let org = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"tid":"72f988bf-86f1-41af-91ab-2d7cd011db47"}"#);
+        assert!(!super::is_personal_tenant(super::tenant_of_id_token(&format!("h.{org}.s")).as_deref()));
+        assert!(super::tenant_of_id_token("not a token").is_none() && !super::is_personal_tenant(None));
+        assert!(!super::scopes(true, true, true).contains("User.ReadBasic.All") && super::scopes(true, true, true).contains("People.Read"));
+        assert!(super::scopes(true, true, false).contains("User.ReadBasic.All"));
+    }
+
     #[tokio::test]
     async fn a_waiting_browser_sign_in_can_be_cancelled() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

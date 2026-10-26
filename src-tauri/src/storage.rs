@@ -55,10 +55,10 @@ pub fn read_bootstrap() -> Option<Bootstrap> {
 /// Atomic write: temp file + fsync + rename + fsync parent directory.
 pub(crate) fn write_bootstrap(b: &Bootstrap) -> Result<()> {
     let dir = config_dir()?;
-    fs::create_dir_all(&dir)?;
+    private_dir(&dir)?;
     let tmp = dir.join("bootstrap.json.tmp");
     {
-        let f = fs::File::create(&tmp)?;
+        let f = private_file(&tmp)?;
         serde_json::to_writer_pretty(&f, b)?;
         f.sync_all()?;
     }
@@ -83,6 +83,94 @@ pub(crate) fn sync_dir(dir: &Path) -> std::io::Result<()> {
     }
 }
 
+/// The app's own folders inside the data folder (only these are made private; the folder itself may be shared).
+pub(crate) const OWN_DIRS: [&str; 4] = ["db", "blobs", "temp_staging", ".graphite-moving"];
+
+/// Creates a folder (and missing parents) that only the user can open: 0700 on Linux. Other systems: plain create.
+pub(crate) fn private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(dir)
+    }
+}
+
+/// Creates (or empties) a file only the user can read: 0600 on Linux.
+pub(crate) fn private_file(path: &Path) -> std::io::Result<fs::File> {
+    let mut o = fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        o.mode(0o600);
+        let f = o.open(path)?;
+        f.set_permissions(fs::Permissions::from_mode(0o600))?; // an existing file keeps its old mode otherwise
+        Ok(f)
+    }
+    #[cfg(not(unix))]
+    {
+        o.open(path)
+    }
+}
+
+/// Linux: makes a tree private (folders 0700, files 0600), without following links. Fixes folders made by older
+/// versions (0755/0644). Returns how many entries were changed. Other systems: nothing to do (per-user profile ACLs).
+pub(crate) fn make_private(path: &Path) -> usize {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(meta) = fs::symlink_metadata(path) else { return 0 };
+        if meta.file_type().is_symlink() {
+            return 0;
+        }
+        let want = if meta.is_dir() { 0o700 } else { 0o600 };
+        let mut changed = 0;
+        if meta.permissions().mode() & 0o7777 != want && fs::set_permissions(path, fs::Permissions::from_mode(want)).is_ok() {
+            changed += 1;
+        }
+        if meta.is_dir() {
+            if let Ok(rd) = fs::read_dir(path) {
+                for e in rd.filter_map(|e| e.ok()) {
+                    changed += make_private(&e.path());
+                }
+            }
+        }
+        changed
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        0
+    }
+}
+
+/// Makes the data folder, the app's folders and files in it, and the settings folder private. Run at every start and
+/// whenever a data folder is opened, so folders created by older versions are fixed.
+pub(crate) fn secure(root: &Path) {
+    let mut changed = 0;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if fs::symlink_metadata(root).is_ok_and(|m| m.is_dir() && m.permissions().mode() & 0o777 != 0o700) && fs::set_permissions(root, fs::Permissions::from_mode(0o700)).is_ok() {
+            changed += 1;
+        }
+    }
+    for d in OWN_DIRS {
+        changed += make_private(&root.join(d));
+    }
+    if let Ok(cfg) = config_dir() {
+        changed += make_private(&cfg);
+    }
+    if changed > 0 {
+        eprintln!("[graphite] made {changed} files and folders private");
+    }
+}
+
 /// First-run: validate the chosen folder, create the vault layout and DB, then record the pointer.
 pub fn initialize(data_root: &str) -> Result<()> {
     let root = Path::new(data_root);
@@ -91,7 +179,7 @@ pub fn initialize(data_root: &str) -> Result<()> {
     fs::write(&probe, b"ok").context("Folder is not writable")?;
     fs::remove_file(probe)?;
     for d in ["db", "blobs", "temp_staging"] {
-        fs::create_dir_all(root.join(d))?;
+        private_dir(&root.join(d))?;
     }
     open_db(root)?;
     write_bootstrap(&Bootstrap {
@@ -120,6 +208,8 @@ pub(crate) fn connect(root: &Path) -> Result<Connection> {
     let conn = Connection::open(root.join("db").join("mail_core.sqlite"))?;
     conn.execute_batch(SCHEMA)?;
     migrate(&conn)?;
+    // The database (and its -wal/-shm files, which SQLite creates with the database's mode) and the mail are private.
+    secure(root);
     Ok(conn)
 }
 
@@ -394,6 +484,64 @@ CREATE TABLE IF NOT EXISTS offline_mutation_queue (
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_private_folders_are_the_ones_the_app_owns() {
+        assert_eq!(super::OWN_DIRS, ["db", "blobs", "temp_staging", ".graphite-moving"], "keep in step with migrate.rs OWN_DIRS and STAGING");
+    }
+
+    /// Linux: a fresh data folder is private, and one made by an older version (0755 folders, 0644 files) is fixed
+    /// when the app starts; links are never followed and the user's other files are left alone.
+    #[cfg(unix)]
+    #[test]
+    fn data_and_settings_are_private_and_old_folders_are_fixed_at_start() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = super::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mode = |p: &std::path::Path| std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o7777;
+        let set = |p: &std::path::Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+        let tmp = std::env::temp_dir().join(format!("gm-perm-{}", uuid::Uuid::new_v4()));
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", tmp.join("cfg")) };
+        let vault = tmp.join("vault");
+        super::initialize(vault.to_str().unwrap()).unwrap();
+        let hash = crate::sync::write_blob(b"<p>mail</p>", "html").unwrap();
+        let blob = vault.join("blobs").join(&hash[..2]).join(format!("{hash}.html"));
+        let cfg = tmp.join("cfg").join("graphite-mail");
+        let db = vault.join("db").join("mail_core.sqlite");
+        for (p, m) in [(&vault, 0o700), (&vault.join("db"), 0o700), (&vault.join("blobs"), 0o700), (&blob.parent().unwrap().to_path_buf(), 0o700), (&blob, 0o600), (&db, 0o600), (&cfg, 0o700), (&cfg.join("bootstrap.json"), 0o600)] {
+            assert_eq!(mode(p), m, "{}", p.display());
+        }
+
+        // As an older version left it: everything readable by others; plus a link to a file outside, and a user file.
+        for d in [&vault, &vault.join("db"), &vault.join("blobs"), &blob.parent().unwrap().to_path_buf(), &cfg] {
+            set(d, 0o755);
+        }
+        for f in [&blob, &db, &cfg.join("bootstrap.json")] {
+            set(f, 0o644);
+        }
+        let outside = tmp.join("outside.txt");
+        std::fs::write(&outside, b"x").unwrap();
+        set(&outside, 0o644);
+        std::os::unix::fs::symlink(&outside, vault.join("blobs").join("link")).unwrap();
+        std::fs::write(vault.join("my-notes.txt"), b"mine").unwrap();
+        set(&vault.join("my-notes.txt"), 0o644);
+
+        *super::DB.lock().unwrap() = None;
+        assert!(super::open_existing().unwrap(), "start-up opens the existing data folder");
+        for (p, m) in [(&vault, 0o700), (&vault.join("db"), 0o700), (&vault.join("blobs"), 0o700), (&blob.parent().unwrap().to_path_buf(), 0o700), (&blob, 0o600), (&db, 0o600), (&cfg, 0o700), (&cfg.join("bootstrap.json"), 0o600)] {
+            assert_eq!(mode(p), m, "fixed at start: {}", p.display());
+        }
+        assert_eq!(mode(&outside), 0o644, "links are not followed");
+        assert_eq!(mode(&vault.join("my-notes.txt")), 0o644, "only the app's own folders are changed");
+        // WAL files SQLite creates later get the database's mode.
+        super::with_db(|db| Ok(db.execute_batch("CREATE TABLE IF NOT EXISTS t(x); INSERT INTO t VALUES(1);")?)).unwrap();
+        for side in ["mail_core.sqlite-wal", "mail_core.sqlite-shm"] {
+            let p = vault.join("db").join(side);
+            if p.exists() {
+                assert_eq!(mode(&p), 0o600, "{side}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
     #[test]
     fn schema_applies() {
         let c = rusqlite::Connection::open_in_memory().unwrap();

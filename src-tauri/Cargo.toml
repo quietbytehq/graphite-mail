@@ -1,6 +1,6 @@
 [package]
 name = "graphite-mail"
-version = "1.11.1"
+version = "1.12.0"
 description = "Offline-first Microsoft 365 and Gmail mail & calendar client for Linux and Windows"
 authors = ["Faisal Gillani"]
 edition = "2024"
@@ -34,6 +34,8 @@ rand = "0.10.3"
 url = "2.5.8"
 anyhow = "1.0.104"
 dirs = "7.0.0"
+# Canonical paths without Windows' "\\?\" prefix (the data folder is stored and shown to the user).
+dunce = "1"
 chrono = "0.4.45"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"

@@ -20,7 +20,10 @@ describe("app password accounts", () => {
     expect(isGmail("microsoft")).toBe(false);
     expect(isGmail(undefined)).toBe(false);
     expect(providerLabel("imap")).toBe("Gmail (app password)");
+    expect(providerLabel("imap", false, { preset: "yahoo" })).toBe("Yahoo Mail (IMAP)");
+    expect(providerLabel("imap", false, { preset: "custom" })).toBe("Other email (IMAP)");
     expect(providerLabel(undefined)).toBe("Microsoft 365");
+    expect(providerLabel(undefined, true)).toBe("Microsoft account (personal)");
   });
 });
 
@@ -31,5 +34,7 @@ describe("connect hint", () => {
     expect(connectHint("me@gmail.com", "   ")).toBe("Enter both fields to continue");
     expect(connectHint("me@gmail.com", "abcd")).toBe("4 of 16 letters");
     expect(connectHint("me@gmail.com", "abcd efgh ijkl mnop")).toBeNull();
+    expect(connectHint("me@yahoo.com", "abcd", false)).toBeNull(); // other providers: any password
+    expect(connectHint("me", "abcd", false)).toMatch(/full email address/);
   });
 });

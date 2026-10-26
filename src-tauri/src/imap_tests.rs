@@ -58,12 +58,12 @@ fn app_passwords_are_cleaned_and_never_shown() {
 
 #[test]
 fn google_sign_in_answers_become_advice() {
-    let say = |t: &str| login_problem("me@gmail.com", t).to_string();
+    let say = |t: &str| login_problem("me@gmail.com", t, true).to_string();
     assert!(say("[ALERT] Application-specific password required: https://support.google.com/accounts/answer/185833 (Failure)").contains("2-Step Verification"));
     assert!(say("[AUTHENTICATIONFAILED] Invalid credentials (Failure)").contains("didn't accept the app password"));
     assert!(say("[ALERT] Your account is not enabled for IMAP use.").contains("IMAP is switched off"));
     // Each is a refusal (status 401), so the offline queue doesn't treat it as "offline".
-    assert_eq!(login_problem("a@b.c", "x").downcast_ref::<Refused>().map(|r| r.status), Some(401));
+    assert_eq!(login_problem("a@b.c", "x", true).downcast_ref::<Refused>().map(|r| r.status), Some(401));
 }
 
 #[test]
@@ -101,6 +101,8 @@ struct FakeBox {
 
 #[derive(Default)]
 struct Gmail {
+    /// A real Gmail (X-GM-EXT-1, "[Gmail]/…" folders, labels) or a plain IMAP server (Dovecot-like).
+    gmail: bool,
     password: String,
     boxes: Vec<FakeBox>,
     raw: BTreeMap<u64, Vec<u8>>,
@@ -112,8 +114,24 @@ struct Gmail {
 }
 
 impl Gmail {
+    /// A plain IMAP server: no X-GM extension, SPECIAL-USE only on some folders, folders named the usual way.
+    fn plain(password: &str) -> Gmail {
+        let mut g = Gmail { gmail: false, password: password.into(), next_id: 1000, modseq: 1, ..Default::default() };
+        for (name, attrs) in [
+            (INBOX, "\\HasNoChildren"),
+            ("Sent", "\\Sent \\HasNoChildren"),
+            ("Drafts", "\\HasNoChildren"),
+            ("Deleted Messages", "\\HasNoChildren"),
+            ("Junk", "\\Junk \\HasNoChildren"),
+            ("Archive", "\\HasNoChildren"),
+            ("Projects", "\\HasNoChildren"),
+        ] {
+            g.create(name, attrs);
+        }
+        g
+    }
     fn new(password: &str) -> Gmail {
-        let mut g = Gmail { password: password.into(), next_id: 1000, modseq: 1, ..Default::default() };
+        let mut g = Gmail { gmail: true, password: password.into(), next_id: 1000, modseq: 1, ..Default::default() };
         for (name, attrs) in [
             (INBOX, "\\HasNoChildren"),
             (ALL, "\\All \\HasNoChildren"),
@@ -146,7 +164,7 @@ impl Gmail {
         self.boxes.iter().filter(|b| b.msgs.iter().any(|(_, g)| *g == id)).map(|b| b.name.clone()).collect()
     }
     fn add_to(&mut self, name: &str, id: u64) {
-        if name != TRASH && name != SPAM && name != ALL && !self.where_is(id).iter().any(|n| n == ALL) {
+        if self.gmail && name != TRASH && name != SPAM && name != ALL && !self.where_is(id).iter().any(|n| n == ALL) {
             self.add_to(ALL, id); // every labelled message is also in All Mail
         }
         let b = self.find_mut(name).expect("mailbox");
@@ -176,6 +194,13 @@ impl Gmail {
     }
     /// Gmail's meaning of "expunged from this mailbox".
     fn expunge_from(&mut self, name: &str, id: u64) {
+        if !self.gmail {
+            self.remove_from(name, id);
+            if self.where_is(id).is_empty() {
+                self.raw.remove(&id);
+            }
+            return;
+        }
         match name {
             TRASH | SPAM => {
                 self.remove_everywhere(id);
@@ -193,7 +218,7 @@ impl Gmail {
         for l in labels {
             self.add_to(l, id);
         }
-        if flags.contains(&"\\Flagged") {
+        if self.gmail && flags.contains(&"\\Flagged") {
             self.add_to(STARRED, id);
         }
         id
@@ -205,7 +230,7 @@ impl Gmail {
             f.push(flag.to_string());
         }
         // Gmail: a star is the Starred label.
-        if flag.eq_ignore_ascii_case("\\Flagged") {
+        if self.gmail && flag.eq_ignore_ascii_case("\\Flagged") {
             if on && !self.where_is(id).iter().any(|n| n == TRASH || n == SPAM) {
                 self.add_to(STARRED, id);
             } else if !on {
@@ -307,7 +332,11 @@ fn handle(g: &mut Gmail, selected: &mut Option<String>, line: &str) -> (Vec<u8>,
     let mut out: Vec<u8> = vec![];
     match cmd.to_ascii_uppercase().as_str() {
         "CAPABILITY" => {
-            w(&mut out, "* CAPABILITY IMAP4rev1 UNSELECT IDLE NAMESPACE QUOTA ID XLIST CHILDREN X-GM-EXT-1 UIDPLUS COMPRESS=DEFLATE ENABLE MOVE CONDSTORE ESEARCH UTF8=ACCEPT LIST-EXTENDED LIST-STATUS LITERAL- SPECIAL-USE APPENDLIMIT=35651584\r\n");
+            if g.gmail {
+                w(&mut out, "* CAPABILITY IMAP4rev1 UNSELECT IDLE NAMESPACE QUOTA ID XLIST CHILDREN X-GM-EXT-1 UIDPLUS COMPRESS=DEFLATE ENABLE MOVE CONDSTORE ESEARCH UTF8=ACCEPT LIST-EXTENDED LIST-STATUS LITERAL- SPECIAL-USE APPENDLIMIT=35651584\r\n");
+            } else {
+                w(&mut out, "* CAPABILITY IMAP4rev1 SASL-IR LOGIN-REFERRALS ID ENABLE IDLE SORT SPECIAL-USE MOVE UIDPLUS\r\n");
+            }
             ok(&mut out, tag, "Success");
         }
         "LOGIN" => {
@@ -322,7 +351,9 @@ fn handle(g: &mut Gmail, selected: &mut Option<String>, line: &str) -> (Vec<u8>,
             }
         }
         "LIST" => {
-            w(&mut out, "* LIST (\\HasChildren \\Noselect) \"/\" \"[Gmail]\"\r\n");
+            if g.gmail {
+                w(&mut out, "* LIST (\\HasChildren \\Noselect) \"/\" \"[Gmail]\"\r\n");
+            }
             for b in &g.boxes {
                 w(&mut out, &format!("* LIST ({}) \"/\" \"{}\"\r\n", b.attrs, b.name));
             }
@@ -434,7 +465,12 @@ fn handle(g: &mut Gmail, selected: &mut Option<String>, line: &str) -> (Vec<u8>,
                     }
                     let hits = matching(g.find(&sel).unwrap(), &t[0]);
                     for (seq, _, id) in hits {
-                        if dest == TRASH || dest == SPAM {
+                        if !g.gmail {
+                            g.add_to(&dest, id);
+                            if c == "MOVE" {
+                                g.remove_from(&sel, id);
+                            }
+                        } else if dest == TRASH || dest == SPAM {
                             g.bin(&dest, id);
                         } else {
                             g.add_to(&dest, id);
@@ -445,6 +481,7 @@ fn handle(g: &mut Gmail, selected: &mut Option<String>, line: &str) -> (Vec<u8>,
                         if c == "MOVE" {
                             w(&mut out, &format!("* {seq} EXPUNGE\r\n"));
                         }
+                        let _ = seq;
                     }
                     ok(&mut out, tag, "Success");
                 }
@@ -516,7 +553,8 @@ async fn fake_imap(g: Arc<Mutex<Gmail>>) -> String {
             tokio::spawn(async move {
                 let (rd, mut wr) = sock.into_split();
                 let mut rd = BufReader::new(rd);
-                let _ = wr.write_all(b"* OK Gimap ready for requests from 127.0.0.1\r\n").await;
+                let greeting: &[u8] = if g.lock().unwrap().gmail { b"* OK Gimap ready for requests from 127.0.0.1\r\n" } else { b"* OK [CAPABILITY IMAP4rev1 SPECIAL-USE MOVE UIDPLUS] Dovecot ready.\r\n" };
+                let _ = wr.write_all(greeting).await;
                 let mut selected = None;
                 let mut line = String::new();
                 loop {
@@ -710,18 +748,18 @@ async fn gmail_with_an_app_password_end_to_end() {
         ("me@gmail.com", "wxyz wxyz wxyz wxyz", "didn't accept the app password"),
         ("me@gmail.com", "normalpassword12", "2-Step Verification"),
     ] {
-        let e = add_account(email, pw).await.unwrap_err().to_string();
+        let e = add_account(email, pw, None).await.unwrap_err().to_string();
         assert!(e.contains(expect), "{email}/{pw}: {e}");
         errors.push(e);
     }
     assert!(errors[4].contains("myaccount.google.com/apppasswords"));
     unsafe { std::env::set_var("GM_TEST_IMAP", "127.0.0.1:1") };
-    let e = add_account("me@gmail.com", "abcd efgh ijkl mnop").await.unwrap_err().to_string();
+    let e = add_account("me@gmail.com", "abcd efgh ijkl mnop", None).await.unwrap_err().to_string();
     assert!(e.contains("Couldn't reach"), "{e}");
     errors.push(e);
     unsafe { std::env::set_var("GM_TEST_IMAP", &imap_addr) };
     out.lock().unwrap().refuse = true;
-    let e = add_account("me@gmail.com", "abcd efgh ijkl mnop").await.unwrap_err().to_string();
+    let e = add_account("me@gmail.com", "abcd efgh ijkl mnop", None).await.unwrap_err().to_string();
     assert!(e.contains("sending"), "{e}");
     errors.push(e);
     out.lock().unwrap().refuse = false;
@@ -731,7 +769,7 @@ async fn gmail_with_an_app_password_end_to_end() {
     assert!(auth::accounts().is_empty(), "nothing is saved until both servers accept the password");
     assert!(auth::app_password("me@gmail.com").is_err());
 
-    let acc = add_account("  Me@Gmail.com ", "abcd efgh ijkl mnop").await.unwrap();
+    let acc = add_account("  Me@Gmail.com ", "abcd efgh ijkl mnop", None).await.unwrap();
     assert_eq!((acc.email.as_str(), acc.provider.as_str(), acc.rules), ("me@gmail.com", PROVIDER, true));
     assert_eq!(auth::app_password("me@gmail.com").unwrap(), PASSWORD, "kept in the keyring, without the spaces");
     assert_eq!(auth::accounts().len(), 1);
@@ -930,4 +968,119 @@ async fn gmail_with_an_app_password_end_to_end() {
         std::env::remove_var("GM_TEST_IMAP");
         std::env::remove_var("GM_TEST_SMTP");
     }
+}
+
+#[test]
+fn common_folder_names_give_roles_on_plain_servers() {
+    for (name, role) in [("Sent", "sentitems"), ("Sent Items", "sentitems"), ("Sent Messages", "sentitems"), ("Drafts", "drafts"), ("Trash", "deleteditems"),
+        ("Deleted Messages", "deleteditems"), ("Deleted Items", "deleteditems"), ("Bin", "deleteditems"), ("Junk", "junkemail"), ("Junk E-mail", "junkemail"),
+        ("Spam", "junkemail"), ("Bulk Mail", "junkemail"), ("Archive", "archive"), ("ARCHIVES", "archive")] {
+        assert_eq!(role_by_name(name), Some(role), "{name}");
+    }
+    for name in ["Projects", "INBOX", "Sent to Ann", "Work", "Caf&AOk-"] {
+        assert_eq!(role_by_name(name), None, "{name}");
+    }
+}
+
+/// "Other email (IMAP)": a Dovecot-like server with no Gmail extension and the usual folder names.
+#[tokio::test]
+async fn other_email_over_plain_imap_end_to_end() {
+    let _guard = storage::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = std::env::temp_dir().join(format!("gm-other-{}", uuid::Uuid::new_v4()));
+    unsafe {
+        std::env::set_var("XDG_CONFIG_HOME", tmp.join("cfg"));
+        std::env::remove_var("GM_TEST_TOKEN");
+        std::env::remove_var("GM_TEST_IMAP");
+        std::env::remove_var("GM_TEST_SMTP");
+    }
+    storage::initialize(tmp.join("vault").to_str().unwrap()).unwrap();
+    let _ = auth::sign_out();
+
+    let g = Arc::new(Mutex::new(Gmail::plain("s3cret-app-pw")));
+    {
+        let mut s = g.lock().unwrap();
+        s.deliver(&[INBOX], mail("o1", "Boss <boss@corp.test>", "Budget", "Please review the budget."), &[]);
+        s.deliver(&[INBOX], mail("o2", "Ana <ana@x.test>", "Lunch?", "Lunch on Friday?"), &[]);
+        s.deliver(&["Archive"], mail("o3", "Old <old@x.test>", "Archived note", "From the archive."), &["\\Seen"]);
+        s.deliver(&["Sent"], mail("o4", "me@example.net", "Sent by me", "Something I sent."), &["\\Seen"]);
+    }
+    let out = Arc::new(Mutex::new(Outgoing { password: "s3cret-app-pw".into(), ..Default::default() }));
+    let imap_addr = fake_imap(g.clone()).await;
+    let smtp_addr = fake_smtp(out.clone()).await;
+    let (ih, ip) = imap_addr.rsplit_once(':').unwrap();
+    let (sh, sp) = smtp_addr.rsplit_once(':').unwrap();
+    let settings = ImapSettings {
+        preset: "custom".into(), imap_host: ih.into(), imap_port: ip.parse().unwrap(), imap_tls: "none".into(),
+        smtp_host: sh.into(), smtp_port: sp.parse().unwrap(), smtp_tls: "none".into(), username: "me@example.net".into(),
+    };
+
+    // Adding: checks before connecting, then both servers; no Gmail wording; passwords of any shape.
+    let e = add_account("me", "x", Some(settings.clone())).await.unwrap_err().to_string();
+    assert!(e.contains("full email address") && !e.contains("Gmail"), "{e}");
+    let e = add_account("me@example.net", "", Some(settings.clone())).await.unwrap_err().to_string();
+    assert!(e.contains("app password") && !e.contains("Google"), "{e}");
+    let bad = ImapSettings { imap_host: "".into(), ..settings.clone() };
+    assert!(add_account("me@example.net", "s3cret-app-pw", Some(bad)).await.unwrap_err().to_string().contains("IMAP server"));
+    let e = add_account("me@example.net", "wrong", Some(settings.clone())).await.unwrap_err().to_string();
+    assert!(e.contains("didn't accept the sign-in") && !e.contains("Google") && !e.contains("wrong"), "{e}");
+    let acc = add_account("me@example.net", "s3cret-app-pw", Some(settings.clone())).await.unwrap();
+    assert_eq!((acc.provider.as_str(), acc.imap.as_ref().map(|s| s.preset.as_str())), ("imap", Some("custom")));
+    assert_eq!(auth::accounts()[0].imap, Some(settings.clone()), "the servers are remembered with the account");
+
+    // Sync: folder roles from SPECIAL-USE where given, from the usual names otherwise; nothing Gmail-only on the wire.
+    let account_id = crate::sync::ensure_account_pub(&acc).unwrap();
+    let rep = auth::in_account(Some(acc.email.clone()), sync_account(&account_id)).await.unwrap();
+    assert!(rep.messages_changed >= 4, "{}", rep.messages_changed);
+    let role = |name: &str| q::<Option<String>>("SELECT well_known_name FROM folders WHERE remote_id=?1", [name]);
+    assert_eq!(role("INBOX").as_deref(), Some("inbox"));
+    assert_eq!(role("Sent").as_deref(), Some("sentitems"), "from \\Sent");
+    assert_eq!(role("Junk").as_deref(), Some("junkemail"), "from \\Junk");
+    assert_eq!(role("Drafts").as_deref(), Some("drafts"), "by name");
+    assert_eq!(role("Deleted Messages").as_deref(), Some("deleteditems"), "by name");
+    assert_eq!(role("Archive").as_deref(), Some("archive"), "by name");
+    assert_eq!(role("Projects"), None);
+    {
+        let s = g.lock().unwrap();
+        assert!(!s.commands.iter().any(|c| c.contains("X-GM")), "no Gmail extension used: {:?}", s.commands.iter().filter(|c| c.contains("FETCH")).next());
+    }
+    assert_eq!(shown_in("Budget"), vec!["Inbox".to_string()]);
+    assert_eq!(shown_in("Archived note"), vec!["Archive".to_string()]);
+
+    // Changes: a move out of Archive really moves (no Gmail "view" rule); delete from Trash expunges.
+    let m1 = local_id("Archived note");
+    outbox::move_to(&m1, &folder_id("Projects")).unwrap();
+    outbox::replay().await.unwrap();
+    {
+        let s = g.lock().unwrap();
+        assert_eq!(s.where_is(s.id_with_subject("Archived note")), vec!["Projects".to_string()]);
+    }
+    let m2 = local_id("Lunch?");
+    outbox::set_read(&m2, true).unwrap();
+    outbox::move_to(&m2, &folder_id("Deleted Messages")).unwrap();
+    outbox::replay().await.unwrap();
+    auth::in_account(Some(acc.email.clone()), sync_account(&account_id)).await.unwrap(); // learns the message's UID in the bin
+    assert_eq!(shown_in("Lunch?"), vec!["Deleted Messages".to_string()]);
+    // Plain IMAP has no server-wide message id (Gmail's X-GM-MSGID): a message is known by folder + UID, so after a
+    // move and a sync it is a fresh local row. Look it up again before deleting it for good.
+    let m2 = local_id("Lunch?");
+    outbox::delete(&m2).unwrap(); // in the bin: for good
+    outbox::replay().await.unwrap();
+    {
+        let s = g.lock().unwrap();
+        assert!(s.raw.values().all(|r| !String::from_utf8_lossy(r).contains("Subject: Lunch?")), "gone from the server");
+    }
+
+    // Sending through the account's own SMTP server with its user name.
+    outbox::send(outbox::Draft { mode: "new".into(), reply_to: None, to: vec!["ana@x.test".into()], cc: vec![], bcc: vec!["hidden@x.test".into()], subject: "Hi".into(), html: "<p>hi</p>".into(), from: Some("me@example.net".into()), attachments: vec![] }).unwrap();
+    assert_eq!(outbox::replay().await.unwrap(), 1);
+    {
+        let o = out.lock().unwrap();
+        let (user, from, rcpts, data) = &o.sent[0];
+        assert_eq!((user.as_str(), from.as_str()), ("me@example.net", "me@example.net"));
+        assert_eq!(rcpts, &vec!["ana@x.test".to_string(), "hidden@x.test".to_string()]);
+        assert!(!data.contains("hidden@x.test"));
+    }
+    // A Gmail account added at the same time still uses Gmail's servers (the test override) and its own rules.
+    assert!(settings_of("me@example.net").is_some() && settings_of("nobody@gmail.com").is_none());
+    let _ = auth::sign_out();
 }

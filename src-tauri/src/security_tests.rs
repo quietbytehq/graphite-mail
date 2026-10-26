@@ -123,8 +123,11 @@ fn needed_permissions() -> std::collections::BTreeSet<String> {
         for line in t.lines().filter(|l| l.contains("from \"@tauri-apps/plugin-dialog\"")) {
             let names = line.split('{').nth(1).and_then(|x| x.split('}').next()).unwrap_or_default();
             for n in names.split(',').map(|n| n.trim().split_whitespace().next().unwrap_or_default()) {
-                if matches!(n, "ask" | "open" | "save" | "confirm" | "message") {
-                    need.insert(format!("dialog:allow-{n}"));
+                match n {
+                    "open" | "save" => { need.insert(format!("dialog:allow-{n}")); }
+                    // ask() and confirm() are the message command (dialog:allow-ask is only a deprecated alias).
+                    "ask" | "confirm" | "message" => { need.insert("dialog:allow-message".to_string()); }
+                    _ => {}
                 }
             }
         }
@@ -151,6 +154,35 @@ fn window_permissions_are_exactly_what_the_ui_uses() {
     }
 }
 
+/// The permissions an external review asked to remove must never come back, and nothing may be both allowed and denied.
+#[test]
+fn no_unused_or_conflicting_permissions() {
+    let cap = json_file("capabilities/default.json");
+    let granted: Vec<String> = cap["permissions"].as_array().unwrap().iter().map(|p| p.as_str().unwrap().to_string()).collect();
+    for banned in [
+        "create-webview", "create-webview-window", "set-always-on-top", "internal-toggle-devtools", "reveal-item-in-dir",
+        "notification:", "tray:", "opener:", "shell:", "fs:", "http:", "core:webview:", "core:app:", "core:path:", "core:menu:",
+        "core:image:", "core:resources:", "core:tray:", "allow-emit", "allow-ask", "allow-confirm", ":default",
+    ] {
+        assert!(!granted.iter().any(|p| p.contains(banned)), "{banned} must not be granted: {granted:?}");
+    }
+    for p in &granted {
+        let deny = p.replacen("allow-", "deny-", 1);
+        assert!(!granted.contains(&deny), "{p} conflicts with {deny}");
+    }
+    // Devtools: off in release builds (no "devtools" feature) and switched off on every window outside debug builds.
+    let cargo = std::fs::read_to_string(root().join("Cargo.toml")).unwrap();
+    let tauri_line = cargo.lines().find(|l| l.starts_with("tauri =")).unwrap();
+    assert!(!tauri_line.contains("devtools"), "{tauri_line}");
+    let lib = std::fs::read_to_string(root().join("src/lib.rs")).unwrap();
+    assert_eq!(lib.matches(".devtools(cfg!(debug_assertions))").count(), 2);
+    let conf = json_file("tauri.conf.json");
+    for w in conf["app"]["windows"].as_array().unwrap() {
+        assert_ne!(w["devtools"], serde_json::json!(true));
+    }
+    assert!(conf["app"]["withGlobalTauri"].as_bool() != Some(true), "no global __TAURI__ object for injected code to use");
+}
+
 #[test]
 fn only_the_main_window_has_a_capability_file() {
     let mut files = vec![];
@@ -160,16 +192,50 @@ fn only_the_main_window_has_a_capability_file() {
 
 #[test]
 fn the_email_frame_can_only_ask_for_popups_which_the_app_turns_into_checked_links() {
-    let mailbox = std::fs::read_to_string(root().join("../src/Mailbox.tsx")).unwrap();
-    let sandbox = mailbox.split("<iframe sandbox=\"").nth(1).and_then(|r| r.split('"').next()).expect("email iframe");
+    let html = std::fs::read_to_string(root().join("../src/emailHtml.ts")).unwrap();
+    let sandbox = html.split("export const FRAME_SANDBOX = \"").nth(1).and_then(|r| r.split('"').next()).expect("FRAME_SANDBOX");
     let flags: Vec<&str> = sandbox.split_whitespace().collect();
-    assert_eq!(flags, vec!["allow-same-origin", "allow-popups"], "no scripts, forms, top navigation or popup escape in emails");
-    assert!(mailbox.contains("node.setAttribute(\"target\", \"_blank\")"), "links ask for a new window");
+    assert_eq!(flags, vec!["allow-popups"], "no scripts, same-origin, forms, top navigation or popup escape in emails");
+    assert!(html.contains("node.setAttribute(\"target\", \"_blank\")"), "links ask for a new window");
+    assert!(html.contains("purify.sanitize("), "email HTML goes through DOMPurify");
+    let frame = std::fs::read_to_string(root().join("../src/MessageFrame.tsx")).unwrap();
+    assert!(frame.contains("sandbox={FRAME_SANDBOX}"));
+    // Every frame showing untrusted HTML is the MessageFrame; nothing else makes an iframe.
+    for (f, t) in frontend_sources() {
+        if !f.ends_with("MessageFrame.tsx") && !f.to_string_lossy().contains(".test.") {
+            assert!(!t.contains("<iframe"), "{}: use MessageFrame", f.display());
+        }
+    }
     let lib = std::fs::read_to_string(root().join("src/lib.rs")).unwrap();
     assert!(lib.contains(".on_new_window(") && lib.contains("NewWindowResponse::Deny"), "the app must refuse every new window");
-    assert!(lib.contains(".on_navigation("));
+    // Both windows (main and splash) have a navigation and a new-window handler.
+    assert_eq!(lib.matches(".on_navigation(").count(), 2, "every window gets a navigation handler");
+    assert_eq!(lib.matches(".on_new_window(").count(), 2, "every window refuses new windows");
+    assert_eq!(lib.matches("WebviewWindowBuilder::").count(), 2, "a new window needs the same handlers");
 }
 
+/// Email HTML never reaches the app's own DOM as an HTML string: no dangerouslySetInnerHTML at all, and the only
+/// innerHTML/insertAdjacentHTML writes are the composer's own markup (blank lines and the escaped signature).
+#[test]
+fn email_html_is_never_inserted_with_inner_html() {
+    let allowed = [
+        "body.current.innerHTML = `<p><br></p>${sig}`; // our own markup; the signature text is escaped",
+        "holder.innerHTML = esc((await invoke<string>(\"get_signature\", { email }).catch(() => \"\")).trim());",
+        "if (sig) body.current.insertAdjacentHTML(\"afterbegin\", `<p><br></p>${sig}`);",
+    ];
+    for (f, t) in frontend_sources() {
+        if f.to_string_lossy().contains(".test.") {
+            continue;
+        }
+        assert!(!t.contains("dangerouslySetInnerHTML"), "{}", f.display());
+        for line in t.lines().map(str::trim) {
+            let writes = line.contains("insertAdjacentHTML") || line.contains("outerHTML =") || line.split("innerHTML").skip(1).any(|rest| rest.trim_start().starts_with('=') && !rest.trim_start().starts_with("=="));
+            if writes {
+                assert!(allowed.contains(&line), "{}: HTML string written into the page: {line}", f.display());
+            }
+        }
+    }
+}
 
 #[test]
 fn the_app_password_account_type_needs_no_google_client() {

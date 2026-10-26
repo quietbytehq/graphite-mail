@@ -7,6 +7,7 @@ mod folders;
 mod google;
 mod http;
 mod imap;
+mod images;
 mod links;
 mod mail;
 mod notify;
@@ -18,6 +19,8 @@ mod storage;
 mod security_tests;
 #[cfg(test)]
 mod platform_tests;
+#[cfg(test)]
+mod personal_tests;
 mod local_contacts;
 mod sync;
 
@@ -96,7 +99,7 @@ async fn grant_contacts(app: tauri::AppHandle, email: String) -> CmdResult<Vec<c
         return Err("Contacts are available for Microsoft 365 accounts.".into());
     }
     let open = |url: &str| app.opener().open_url(url, None::<&str>).map_err(|e| anyhow::anyhow!(e.to_string()));
-    let got = auth::sign_in_scoped(open, acc.rules, true, Some(&email)).await.map_err(|e| e.to_string())?;
+    let got = auth::sign_in_scoped(open, acc.rules, true, Some(&email), acc.personal).await.map_err(|e| e.to_string())?;
     if !got.email.eq_ignore_ascii_case(&email) {
         return Err(format!("You signed in as {}, but this is for {email}. Please try again with {email}.", got.email));
     }
@@ -160,8 +163,14 @@ fn cancel_sign_in() {
 /// Gmail with an app password (IMAP + SMTP): checks both servers accept it, then keeps it in the keyring.
 /// Needs no Google sign-in client, so it works in every build.
 #[tauri::command]
-async fn add_imap_account(email: String, password: String) -> CmdResult<Account> {
-    imap::add_account(&email, &password).await.map_err(|e| e.to_string())
+async fn add_imap_account(email: String, password: String, settings: Option<imap::ImapSettings>) -> CmdResult<Account> {
+    imap::add_account(&email, &password, settings).await.map_err(|e| e.to_string())
+}
+
+/// The link a user can send their IT administrator to approve Graphite Mail for the organisation.
+#[tauri::command]
+fn admin_consent_link(email: Option<String>) -> String {
+    auth::admin_consent_url(email.as_deref())
 }
 
 /// Confirms the stored session still works by silently refreshing a token.
@@ -219,6 +228,18 @@ fn list_folders() -> CmdResult<Vec<mail::Folder>> {
 #[tauri::command]
 fn list_messages(folder_id: String, offset: i64, limit: i64) -> CmdResult<Vec<mail::MessageRow>> {
     mail::messages(&folder_id, offset, limit).map_err(|e| e.to_string())
+}
+
+/// Whether this sender's remote images are always loaded.
+#[tauri::command]
+fn image_sender_allowed(address: String) -> CmdResult<bool> {
+    images::allowed(&address).map_err(|e| e.to_string())
+}
+
+/// "Always load images from this sender" (allowed) or "Stop loading them".
+#[tauri::command]
+fn set_image_sender(address: String, allowed: bool) -> CmdResult<()> {
+    images::set(&address, allowed).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -350,8 +371,8 @@ async fn open_attachment(app: tauri::AppHandle, id: String) -> CmdResult<()> {
 }
 
 #[tauri::command]
-async fn save_attachment(id: String, dest: String) -> CmdResult<()> {
-    attachments::save(&id, &dest).await.map_err(|e| e.to_string())
+async fn save_attachment(id: String, dest: String) -> CmdResult<String> {
+    attachments::save(&id, &dest).await.map(|p| p.to_string_lossy().into_owned()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -596,6 +617,7 @@ pub fn run() {
             export_vcards,
             block_address,
             cancel_sign_in,
+            admin_consent_link,
             get_notifications,
             set_notifications,
             create_folder,
@@ -611,6 +633,8 @@ pub fn run() {
             list_folders,
             list_messages,
             get_message,
+            image_sender_allowed,
+            set_image_sender,
             search_messages,
             set_read,
             set_flag,
@@ -644,10 +668,16 @@ pub fn run() {
             // The main window loads in the background, hidden, while the splash animation plays.
             let main = tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
                 .visible(false)
+                // Developer tools only in debug builds (release builds also lack the "devtools" feature).
+                .devtools(cfg!(debug_assertions))
                 .on_navigation(move |url| allow_navigation(&handle, url))
                 .on_new_window(move |url, _features| new_window_request(&handle2, url))
                 .build()?;
             match tauri::WebviewWindowBuilder::new(app, "splash", tauri::WebviewUrl::App("splash.html".into()))
+                // The splash only ever shows its own page: no links, no other pages, no windows.
+                .devtools(cfg!(debug_assertions))
+                .on_navigation(|url| links::classify(url, cfg!(dev)) == links::Action::Allow)
+                .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
                 .title("Graphite Mail")
                 .inner_size(520.0, 520.0)
                 .decorations(false)

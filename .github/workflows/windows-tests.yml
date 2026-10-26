@@ -18,7 +18,7 @@ jobs:
     name: Rust tests (windows-latest)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: NASM (needed by aws-lc-sys)
         shell: pwsh
         run: |
@@ -27,7 +27,7 @@ jobs:
       - name: Rust toolchain
         run: rustup toolchain install stable --profile minimal && rustup default stable
       - name: Cargo cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry

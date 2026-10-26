@@ -166,7 +166,7 @@ pub async fn sign_in_with(open: impl FnOnce(&str) -> Result<()>, rules: bool, hi
 
     let me: Value = crate::http::client().get(USERINFO_URL).bearer_auth(&tok.access_token).send().await?.error_for_status()?.json().await?;
     let email = me["email"].as_str().ok_or_else(|| anyhow!("Google didn't tell us the account's email address."))?.to_string();
-    let acc = auth::Account { display_name: me["name"].as_str().unwrap_or(&email).to_string(), email, provider: "google".into(), rules, contacts: false };
+    let acc = auth::Account { display_name: me["name"].as_str().unwrap_or(&email).to_string(), email, provider: "google".into(), rules, contacts: false, personal: false, imap: None };
     auth::remember(&acc, &rt)?;
     auth::cache_token(&acc.email, &tok.access_token, tok.expires_in);
     Ok(acc)
@@ -1344,7 +1344,9 @@ pub(crate) mod tests {
         // Without blind copies there is no Bcc header at all.
         let raw = build_raw(("Me", "g@x.com"), &["a@b.c".into()], &["c@d.e".into()], &[], "Hi", "<p>x</p>", None, &[]).unwrap();
         let text = String::from_utf8_lossy(&raw).to_string();
-        assert!(!text.to_ascii_lowercase().contains("bcc"), "{text}");
+        // (Only header lines count: the random MIME boundary can contain the letters "bcc".)
+        assert!(!text.lines().any(|l| l.to_ascii_lowercase().starts_with("bcc:")), "{text}");
+        assert!(!text.contains("hidden"));
         // With them, the Gmail API needs the Bcc header (it turns it into envelope recipients and strips it on delivery);
         // the address must not be in To or Cc.
         let raw = build_raw(("Me", "g@x.com"), &["a@b.c".into()], &["c@d.e".into()], &["hidden@x.com".into()], "Hi", "<p>x</p>", None, &[]).unwrap();

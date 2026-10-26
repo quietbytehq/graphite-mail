@@ -13,6 +13,9 @@ password) IMAP + SMTP. No server of its own, no telemetry: your mail goes from t
 - **Microsoft 365 and Gmail**, several accounts at once, with an **All Inboxes** view and a colour dot per account.
 - Gmail through **Google sign-in** (needs a build with a Google client, see below) or with a **Google app password**
   (IMAP/SMTP, works in every build).
+- **Other email over IMAP**: Yahoo, iCloud, Zoho, Fastmail, AOL (presets with app-password help) or any custom
+  IMAP/SMTP server (TLS or STARTTLS). Mail only: these providers' calendars and address books aren't synced.
+- **Personal Microsoft accounts** (outlook.com, hotmail.com, live.com) as well as Microsoft 365.
 - **Offline first**: your mailbox is stored on this computer; read and search it without a connection. Read, flag, move,
   delete, reply and send while offline: changes queue up and are replayed when you reconnect, in order, with retries.
 - **Compose** with To, Cc and **Bcc** (blind copies never reach other recipients' headers on any account type), signatures
@@ -116,9 +119,31 @@ Credentials, entries named `graphite-mail`). Uninstall from *Settings → Apps*;
 - **Microsoft 365**: *Sign in with Microsoft* opens your browser; sign in there and come back. Graphite Mail listens on
   a random port of `localhost` for the redirect, so nothing needs to be configured. *Cancel sign-in* stops it, and it
   gives up by itself after two minutes.
+- **Personal Microsoft accounts** (outlook.com, hotmail.com, live.com) sign in the same way. They have no
+  organisation directory, so Contacts shows only your own contacts, and no admin approval is ever involved.
 - **Gmail with Google sign-in**: the same, with *Sign in with Google* — only in builds made with a Google OAuth client
   (see *Build from source*). The public builds say "Google sign-in coming soon".
 - **Gmail with an app password**: works everywhere; see the next section.
+
+## Using Graphite Mail in an organisation
+
+Some organisations don't let people approve apps themselves. Then *Sign in with Microsoft* ends on a "Need admin
+approval" page, or Microsoft answers with an error such as AADSTS90094 or AADSTS65001. Graphite Mail recognises
+this and shows **Your organisation needs to approve Graphite Mail** with a **Copy link for your IT admin** button.
+
+What to do:
+1. Press the button and send the copied link to your IT administrator. It opens Microsoft's admin-consent page for
+   Graphite Mail in your organisation's directory (the link holds only the app's public client id and the permission
+   names: no tokens, no secrets).
+2. The administrator signs in there and approves once. That covers everyone in the organisation.
+3. Sign in again in Graphite Mail. (After approving, the administrator's browser is sent to `http://localhost`, which
+   shows a "can't connect" page; that is expected and harmless.)
+
+What the link asks for, and why (the same permissions a user would be asked for, see *Permissions* below):
+`User.Read` (your name and address), `Mail.ReadWrite` and `Mail.Send` (mail), `Calendars.ReadWrite` (calendar),
+`MailboxSettings.ReadWrite` (Outlook rules), `Contacts.Read`, `People.Read` and `User.ReadBasic.All` (contacts and
+the directory). The app runs on your computer only and talks to Microsoft directly; there is no Graphite Mail server.
+Personal Microsoft accounts (outlook.com, hotmail.com, live.com) never need this.
 
 ## How to create a Gmail app password
 
@@ -134,6 +159,17 @@ password and without Google sign-in. Google only offers them on accounts with 2-
    **Add Gmail (app password)**. Enter your Gmail address, paste the code (spaces don't matter) and click **Connect**.
    Graphite Mail checks the code against Gmail's servers before it saves anything.
 5. To revoke it later, delete it on the same Google page (and remove the account in Graphite Mail's Settings).
+
+### Other providers (Yahoo, iCloud, Zoho, Fastmail, AOL, custom)
+
+Choose the provider in the same form (*Email provider*). Each preset fills in the servers and shows where that provider
+creates app passwords: Yahoo and AOL under *Account security → Generate app password*; iCloud at account.apple.com
+→ *Sign-In and Security → App-Specific Passwords*; Zoho at accounts.zoho.com → *Security → App Passwords* (IMAP must be
+switched on in Zoho Mail's settings; EU/IN/AU accounts use regional servers, so pick *Custom server* there); Fastmail
+under *Settings → Privacy & Security → Integrations → New app password*. *Custom server* takes the IMAP and SMTP host,
+port and security (TLS, usually 993/465, or STARTTLS, usually 143/587) and an optional user name. Folder icons come
+from the server's SPECIAL-USE flags, or from the usual folder names (Sent, Drafts, Trash, Junk, Archive) where the
+server gives none.
 
 Notes: IMAP must be enabled for the account (Gmail → Settings → *See all settings* → *Forwarding and POP/IMAP*; on new
 accounts it is). Google Workspace administrators can switch app passwords off for their domain. The code is kept only
@@ -151,6 +187,7 @@ Graphite Mail only ever asks for what a feature needs, when you first use the fe
 | Gmail (Google sign-in) | Sign-in | `openid email profile gmail.modify calendar` | mail, labels, sending, Google Calendar |
 | Gmail (Google sign-in) | Home → Rules → **Allow rules** | `gmail.settings.basic` | Gmail filters |
 | Gmail (app password) | Adding the account | the app password you created (IMAP + SMTP, TLS) | mail only: no calendar, no Google contacts, local rules |
+| Other email (IMAP) | Adding the account | the app password (or password) for that server | mail only: no calendar or provider address book, local rules |
 
 On this computer, the app needs nothing special: it reads and writes its own data folder, keeps secrets in the keyring,
 opens links in your browser, shows notifications, and opens a file dialog when you attach, save or import. The release
@@ -172,6 +209,8 @@ deleted by **Remove cached contacts** (Settings) or by removing the account.
   Gmail's Sent Mail may not show them for app-password accounts.
 - **Notifications on Windows** need the installed app (the Start-menu shortcut registers it); running the bare `.exe`
   from a build folder shows none.
+- **Plain IMAP servers** (anything but Gmail) have no server-wide message id: a message moved to another folder on
+  another device shows up as new after the next sync (read state and flags come from the server, so nothing is lost).
 - Shared mailboxes, delegated calendars, S/MIME and PGP are not supported.
 - The Windows build is new (v1.11): see the release notes for what has been checked on a real machine.
 
@@ -192,6 +231,12 @@ npm test                # frontend tests
 npx tsc --noEmit        # type check
 cd src-tauri && cargo test   # Rust tests (fake Graph, Gmail, IMAP and SMTP servers; no network)
 ```
+
+The Microsoft sign-in uses the public client id in `src-tauri/src/auth.rs` with the `common` authority. If you register
+your own app in Microsoft Entra, set *Supported account types* to **Accounts in any organizational directory and
+personal Microsoft accounts** (manifest `signInAudience: AzureADandPersonalMicrosoftAccount`), add the *Mobile and
+desktop applications* redirect URI `http://localhost`, and enable *Allow public client flows*. Without the personal
+option, outlook.com / hotmail.com / live.com users get AADSTS50020 or AADSTS9002331 at sign-in.
 
 Gmail sign-in needs your own Google OAuth "Desktop app" client. Put it in the untracked file `src-tauri/google_oauth.json`
 (copy `src-tauri/google_oauth.example.json`) or set `GRAPHITE_GOOGLE_CLIENT_ID` / `GRAPHITE_GOOGLE_CLIENT_SECRET` when

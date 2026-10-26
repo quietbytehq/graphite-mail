@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import DOMPurify from "dompurify";
 import { DragBar } from "./WindowControls";
 import Icon from "./Icon";
 import Compose, { ComposeInit } from "./Compose";
@@ -17,6 +16,8 @@ import { Selection, bulkFlag, bulkRead, clickSelect, prune, selectAll, single } 
 import { THEMES, ThemeChoice, applyTheme, cachedChoice, isChoice, isDark, resolveTheme } from "./theme";
 import { isGmail } from "./accounts";
 import FolderTile from "./FolderTile";
+import MessageFrame from "./MessageFrame";
+import { buildDoc } from "./emailHtml";
 import { folderRoles } from "./folderIcons";
 
 type Account = { email: string; display_name: string; provider?: string; rules?: boolean };
@@ -58,38 +59,6 @@ function people(json: string | null) {
   } catch {
     return "";
   }
-}
-
-/** Sanitize, block remote content unless allowed, and optionally darken the email canvas. */
-function buildDoc(html: string, allowRemote: boolean, dark: boolean) {
-  let blocked = 0;
-  DOMPurify.removeAllHooks();
-  DOMPurify.addHook("afterSanitizeAttributes", (node) => {
-    if (node.tagName === "A") {
-      // A click asks for a new window; the app (Rust side) refuses the window and opens the system browser instead.
-      // (Navigating the frame itself would be blocked by the content-security-policy, frame-src 'self'.)
-      node.setAttribute("target", "_blank");
-      node.setAttribute("rel", "noopener noreferrer");
-    }
-    if (!allowRemote) {
-      for (const attr of ["src", "background", "srcset"]) {
-        const v = node.getAttribute(attr);
-        if (v && /^(https?:)?\/\//i.test(v)) {
-          node.removeAttribute(attr);
-          blocked++;
-        }
-      }
-      const style = node.getAttribute("style");
-      if (style && /url\(/i.test(style)) {
-        node.setAttribute("style", style.replace(/url\([^)]*\)/gi, "none"));
-        blocked++;
-      }
-    }
-  });
-  const clean = DOMPurify.sanitize(html, { WHOLE_DOCUMENT: true, FORBID_TAGS: ["script", "form", "iframe", "object", "embed"] });
-  const darkCss = dark ? "html{filter:invert(.9) hue-rotate(180deg);background:#fff} img,video,picture{filter:invert(1) hue-rotate(180deg)}" : "";
-  const doc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: cid: ${allowRemote ? "https: http:" : ""}; style-src 'unsafe-inline';"><style>body{font-family:system-ui,sans-serif;font-size:14px;margin:16px 20px;word-wrap:break-word} ${darkCss}</style></head><body>${clean}</body></html>`;
-  return { doc, blocked };
 }
 
 /** Folders of one account as a tree: children under their parent, indented. */
@@ -134,7 +103,10 @@ export default function Mailbox({ account: _first, onSignOut }: { account: Accou
   const [syncing, setSyncing] = useState(false);
   const [status, setStatus] = useState("");
   const [online, setOnline] = useState(navigator.onLine);
+  // Remote images: loaded for this message only ("Load images"), or always for senders the user trusts.
   const [allowRemote, setAllowRemote] = useState(false);
+  const [trustedSender, setTrustedSender] = useState(false);
+  const showImages = allowRemote || trustedSender;
   const [themeChoice, setThemeChoice] = useState<ThemeChoice>(cachedChoice);
   const [sysDark, setSysDark] = useState(() => matchMedia("(prefers-color-scheme: dark)").matches);
   const dark = isDark(resolveTheme(themeChoice, sysDark));
@@ -313,9 +285,9 @@ export default function Mailbox({ account: _first, onSignOut }: { account: Accou
     if (mode === "new" || !selected) return newMail();
     const s = selected;
     const me = s.account_email.toLowerCase();
-    const header = `On ${new Date(s.received_at * 1000).toLocaleString()}, ${s.sender_name ?? ""} &lt;${s.sender_address ?? ""}&gt; wrote:`;
+    const header = `On ${new Date(s.received_at * 1000).toLocaleString()}, ${s.sender_name ?? ""} <${s.sender_address ?? ""}> wrote:`; // plain text
     const subj = s.subject ?? "";
-    const base = { replyTo: s.id, from: s.account_email, quoteHtml: s.body_html ?? "", quoteHeader: header };
+    const base = { replyTo: s.id, from: s.account_email, quoteHtml: s.body_html ?? "", quoteHeader: header, quoteImages: showImages };
     if (mode === "forward") return setCompose({ ...base, mode, subject: /^fw(d)?:/i.test(subj) ? subj : `Fw: ${subj}` });
     const re = /^re:/i.test(subj) ? subj : `Re: ${subj}`;
     const to = [s.sender_address ?? ""].filter(Boolean);
@@ -407,11 +379,13 @@ export default function Mailbox({ account: _first, onSignOut }: { account: Accou
 
   const open = async (m: Msg) => {
     setAllowRemote(false);
+    setTrustedSender(false);
     setMoveOpen(false);
     setSel(single(m.id));
     const d = await invoke<Detail>("get_message", { id: m.id });
     setSelected(d);
     setAtts([]);
+    if (m.sender_address) invoke<boolean>("image_sender_allowed", { address: m.sender_address }).then((ok) => setSelected((s) => { if (s && s.id === m.id) setTrustedSender(!!ok); return s; })).catch(() => {});
     if (m.has_attachments) invoke<Att[]>("list_attachments", { messageId: m.id }).then((a) => setSelected((s) => { if (s && s.id === m.id) setAtts(a); return s; })).catch(() => {});
     if (!m.is_read) {
       invoke("set_read", { id: m.id, read: true }).then(() => { patch(m.id, { is_read: true }); loadFolders(); }).catch(() => {});
@@ -419,9 +393,24 @@ export default function Mailbox({ account: _first, onSignOut }: { account: Accou
   };
 
   const rendered = useMemo(
-    () => (selected?.body_html ? buildDoc(selected.body_html, allowRemote, dark && darkMail) : null),
-    [selected, allowRemote, dark, darkMail],
+    () => (selected?.body_html ? buildDoc(selected.body_html, showImages, dark && darkMail) : null),
+    [selected, showImages, dark, darkMail],
   );
+  // How many remote images the message has (also when they are shown, for the "always load" bar).
+  const remoteImages = useMemo(
+    () => (!selected?.body_html ? 0 : showImages ? buildDoc(selected.body_html, false, false).blocked : rendered?.blocked ?? 0),
+    [selected, showImages, rendered],
+  );
+  const trustSender = async (allowed: boolean) => {
+    const address = selected?.sender_address;
+    if (!address) return;
+    try {
+      await invoke("set_image_sender", { address, allowed });
+      setTrustedSender(allowed);
+      if (!allowed) setAllowRemote(false);
+      flash(allowed ? `Images from ${address} will always be loaded` : `Images from ${address} will be blocked again`);
+    } catch (e) { flash(String(e)); }
+  };
 
   const current = folders.find((f) => f.id === folderId);
   const inboxes = folders.filter((f) => f.well_known === "inbox");
@@ -742,20 +731,29 @@ export default function Mailbox({ account: _first, onSignOut }: { account: Accou
                       <Icon name="paperclip" size={13} /> <span className="attname">{a.name}</span> <span className="muted">{attBusy === a.id ? "downloading…" : fmtBytes(a.size)}</span>
                     </button>
                     <button className="attsave" title="Save a copy…" disabled={attBusy === a.id}
-                      onClick={async () => { const dest = await saveDialog({ defaultPath: a.name, title: "Save attachment" }); if (!dest) return; setAttBusy(a.id); try { await invoke("save_attachment", { id: a.id, dest }); flash("Saved"); } catch (e) { flash(String(e)); } finally { setAttBusy(""); } }}>Save</button>
+                      onClick={async () => { const dest = await saveDialog({ defaultPath: a.name, title: "Save attachment" }); if (!dest) return; setAttBusy(a.id); try { const at = await invoke<string>("save_attachment", { id: a.id, dest }); flash(at ? `Saved as ${at}` : "Saved"); } catch (e) { flash(String(e)); } finally { setAttBusy(""); } }}>Save</button>
                   </span>
                 ))}
               </div>
             )}
-            {rendered && rendered.blocked > 0 && !allowRemote && (
-              <div className="notice">
-                <span>Remote content was blocked to protect your privacy.</span>
-                <button onClick={() => setAllowRemote(true)}>Load</button>
+            {rendered && remoteImages > 0 && !showImages && (
+              <div className="notice imgbar">
+                <span>Images from the internet were blocked to protect your privacy.</span>
+                <span className="imgbar-actions">
+                  <button onClick={() => setAllowRemote(true)}>Load images</button>
+                  {selected.sender_address && <button onClick={() => trustSender(true)}>Always load from {selected.sender_address}</button>}
+                </span>
+              </div>
+            )}
+            {rendered && remoteImages > 0 && trustedSender && (
+              <div className="notice imgbar">
+                <span>Images from {selected.sender_address} are always loaded.</span>
+                <button onClick={() => trustSender(false)}>Stop loading them</button>
               </div>
             )}
             {rendered ? (
               <div className="bodywrap">
-                <iframe sandbox="allow-same-origin allow-popups" srcDoc={rendered.doc} title="message" />
+                <MessageFrame doc={rendered.doc} title="message" />
               </div>
             ) : (
               <div className="empty">This message hasn't been downloaded for offline reading yet. It will appear after the next sync.</div>

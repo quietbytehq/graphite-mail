@@ -89,7 +89,7 @@ fn setup(base: &str) -> std::path::PathBuf {
     .unwrap();
     let _ = auth::sign_out();
     for (email, provider) in [("me@corp.com", "microsoft"), ("me@gmail.com", "imap")] {
-        auth::remember_account(&auth::Account { email: email.into(), display_name: email.into(), provider: provider.into(), rules: false, contacts: false }).unwrap();
+        auth::remember_account(&auth::Account { email: email.into(), display_name: email.into(), provider: provider.into(), rules: false, contacts: false, personal: false, imap: None }).unwrap();
     }
     tmp
 }
@@ -261,7 +261,7 @@ async fn missing_permission_is_a_status_with_a_way_out() {
     sync_account("a", false).await.unwrap();
     assert_eq!(fake.lock().unwrap().seen.len(), n);
     // Granted, but the organisation still refuses: "blocked" (the view explains it and offers Grant access again).
-    auth::remember_account(&auth::Account { email: "me@corp.com".into(), display_name: "Me".into(), provider: "microsoft".into(), rules: false, contacts: true }).unwrap();
+    auth::remember_account(&auth::Account { email: "me@corp.com".into(), display_name: "Me".into(), provider: "microsoft".into(), rules: false, contacts: true, personal: false, imap: None }).unwrap();
     sync_account("a", true).await.unwrap();
     assert_eq!(statuses(None).unwrap()[0].directory, "blocked");
     // Offline is an error to retry, not a permission problem.

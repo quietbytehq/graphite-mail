@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
-import DOMPurify from "dompurify";
+import MessageFrame from "./MessageFrame";
+import { buildDoc } from "./emailHtml";
 import Icon from "./Icon";
 
 export type Cal = { id: string; name: string; color: string; is_primary: boolean; can_edit: boolean; account_email: string; provider?: string };
@@ -227,7 +228,7 @@ function EventDetail({ e, cal, onClose, onRespond, onDelete }: { e: Ev; cal?: Ca
               ))}
             </div>
           )}
-          {e.description_html && <div className="evdesc" dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(e.description_html, { FORBID_TAGS: ["style", "img", "script"] }) }} />}
+          {e.description_html && <div className="evdesc evframe"><MessageFrame doc={buildDoc(e.description_html, false, false).doc} title="event description" /></div>}
         </div>
         <div className="sheet-bar">
           {cal?.can_edit !== false ? <button onClick={() => onDelete(e)}>Delete</button> : <span />}

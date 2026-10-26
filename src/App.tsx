@@ -5,7 +5,8 @@ import Mailbox from "./Mailbox";
 import AppPasswordForm from "./AppPasswordForm";
 import { DragBar, TrafficLights } from "./WindowControls";
 import { applyTheme, cachedChoice } from "./theme";
-import { SIGN_IN_CANCELLED, useBrowserSignIn } from "./signIn";
+import { SIGN_IN_CANCELLED, adminApproval, useBrowserSignIn } from "./signIn";
+import AdminApproval from "./AdminApproval";
 import { dataFolderFrom } from "./paths";
 import "./App.css";
 
@@ -115,7 +116,7 @@ export default function App() {
         {googleOk && <button onClick={() => start("google")} disabled={busy}>{signIn.waiting === "google" ? "Waiting for browser sign-in…" : "Sign in with Google"}</button>}
       </div>
       {googleOk === false && <p className="muted">Google sign-in coming soon. Use an app password for now.</p>}
-      <button className="linkish" onClick={() => { setError(""); setNote(""); setAppPassword(true); }} disabled={busy}>Use Gmail with an app password instead</button>
+      <button className="linkish" onClick={() => { setError(""); setNote(""); setAppPassword(true); }} disabled={busy}>Use Gmail or another email account with an app password</button>
       {busy && (
         <div className="row" style={{ justifyContent: "center", alignItems: "center" }}>
           <span className="muted">Finish signing in in your web browser, then come back here.</span>
@@ -123,7 +124,7 @@ export default function App() {
         </div>
       )}
       {note && !busy && <p className="muted">{note}</p>}
-      {error && <p className="error">{error}</p>}
+      {error && (adminApproval(error) ? <AdminApproval message={adminApproval(error)!} /> : <p className="error">{error}</p>)}
     </Onboard>
   );
 }

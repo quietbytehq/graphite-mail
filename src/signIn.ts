@@ -46,3 +46,11 @@ export function useBrowserSignIn<K extends string>(onStop: (note: string) => voi
 
   return { waiting, run, stop };
 }
+
+/** Microsoft's answer when an organisation's administrator must approve the app first. The backend marks that error
+ *  with this prefix (see auth::ADMIN_APPROVAL_MARK); the screens then show the explanation and the link to send. */
+export const ADMIN_APPROVAL_MARK = "admin-approval:";
+export function adminApproval(error: unknown): string | null {
+  const text = String(error ?? "");
+  return text.startsWith(ADMIN_APPROVAL_MARK) ? text.slice(ADMIN_APPROVAL_MARK.length).trim() : null;
+}

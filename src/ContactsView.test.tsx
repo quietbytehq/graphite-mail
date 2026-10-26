@@ -360,3 +360,19 @@ describe("Gmail (app password) contacts", () => {
     expect(importLine({ added: 2, updated: 1, skipped: 3 })).toBe("3 contacts imported (1 updated, 3 skipped)");
   });
 });
+
+describe("Personal Microsoft accounts", () => {
+  it("hides the Directory group and shows no consent prompt for the directory", async () => {
+    const personal: ContactStatus = { email: "ann@outlook.com", granted: true, personal_account: true, directory: "n/a", personal: "ok", directory_count: 0, personal_count: 1, last_sync: 1 };
+    mocked.mockImplementation(async (cmd: string) => {
+      if (cmd === "contacts_overview") return { favourites: { total: 0, rows: [] }, directory: { total: 0, rows: [] }, personal: { total: 1, rows: [{ ...row("p1", "Anna Bell", "personal", "anna@home.com"), account_email: "ann@outlook.com" }] }, accounts: [personal] } satisfies Overview;
+      return null;
+    });
+    render(<ContactsView accounts={[{ email: "ann@outlook.com", display_name: "Ann", provider: "microsoft", personal: true }]} onNewEmail={() => {}} onToast={() => {}} />);
+    expect(await screen.findByRole("group", { name: "My contacts" })).toBeTruthy();
+    await screen.findByText("Anna Bell");
+    expect(screen.queryByRole("group", { name: "Directory" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Grant access" })).toBeNull();
+    expect(statusNote(personal)).toBeNull();
+  });
+});

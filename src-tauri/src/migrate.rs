@@ -70,12 +70,13 @@ pub(crate) fn normalize_for_test(p: &Path) -> Result<PathBuf> {
     normalize(p)
 }
 
-/// Canonical form of a path that may not exist yet (canonicalise the part that does).
+/// Canonical form of a path that may not exist yet (canonicalise the part that does). Uses `dunce`, so on Windows
+/// the result is `C:\Users\…` rather than `\\?\C:\Users\…`: this value is stored in bootstrap.json and shown in Settings.
 fn normalize(p: &Path) -> Result<PathBuf> {
     let mut rest = Vec::new();
     let mut cur = p.to_path_buf();
     loop {
-        if let Ok(c) = cur.canonicalize() {
+        if let Ok(c) = dunce::canonicalize(&cur) {
             return Ok(rest.iter().rev().fold(c, |acc, part| acc.join(part)));
         }
         match (
@@ -126,7 +127,7 @@ fn sync_dir(p: &Path) {
 /// Copies one file, reads it back from the new place and compares. Returns its size.
 fn copy_verified(src: &Path, dst: &Path) -> Result<u64> {
     if let Some(dir) = dst.parent() {
-        fs::create_dir_all(dir)?;
+        storage::private_dir(dir)?;
     }
     let tmp = dst.with_extension("moving-tmp");
     let mut hasher = Sha256::new();
@@ -135,7 +136,7 @@ fn copy_verified(src: &Path, dst: &Path) -> Result<u64> {
         let mut r =
             fs::File::open(src).with_context(|| format!("Cannot read {}", src.display()))?;
         let mut w =
-            fs::File::create(&tmp).with_context(|| format!("Cannot write {}", tmp.display()))?;
+            storage::private_file(&tmp).with_context(|| format!("Cannot write {}", tmp.display()))?;
         let mut buf = vec![0u8; 1 << 20];
         loop {
             let n = r.read(&mut buf)?;
@@ -319,7 +320,7 @@ fn validate(source: &Path, target: &Path) -> Result<PathBuf> {
 
 fn copy_and_switch(source: &Path, dest: &Path, say: &dyn Fn(u8, &str, u64, u64)) -> Result<()> {
     let stage = dest.join(STAGING);
-    fs::create_dir_all(stage.join("blobs"))?;
+    storage::private_dir(&stage.join("blobs"))?;
 
     // Phase 3: bulk copy of saved mail while the app keeps working.
     let first = list_blobs(source);
@@ -346,10 +347,11 @@ fn copy_and_switch(source: &Path, dest: &Path, say: &dyn Fn(u8, &str, u64, u64))
         }
     }
     let _ = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
-    fs::create_dir_all(stage.join("db"))?;
+    storage::private_dir(&stage.join("db"))?;
     let snap = stage.join("db").join("mail_core.sqlite");
     db.execute("VACUUM INTO ?1", [snap.to_string_lossy().as_ref()])?;
-    fs::create_dir_all(stage.join("temp_staging"))?;
+    storage::make_private(&snap);
+    storage::private_dir(&stage.join("temp_staging"))?;
     checkpoint(4)?;
 
     // Phase 5: check the copy before relying on it.
@@ -467,9 +469,10 @@ mod tests {
 
     fn assert_works_at(root: &Path) {
         let b = storage::read_bootstrap().unwrap();
-        // The pointer keeps the path as it was given (on Windows that can be a short "RUNNER~1" form, while
-        // canonicalize() gives the long "\\?\" form), so compare the canonical forms.
-        assert_eq!(Path::new(&b.active_data_root).canonicalize().unwrap(), root.canonicalize().unwrap());
+        // The pointer keeps the path as it was given (on Windows that can be a short "RUNNER~1" form), so compare
+        // canonical forms; and whatever it holds must never carry Windows' verbatim "\\?\" prefix.
+        assert_eq!(dunce::canonicalize(&b.active_data_root).unwrap(), dunce::canonicalize(root).unwrap());
+        assert!(!b.active_data_root.starts_with("\\\\?\\"), "{}", b.active_data_root);
         assert_eq!(b.migration_state, "IDLE");
         storage::with_db(|db| {
             let n: i64 = db.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))?;
@@ -480,6 +483,25 @@ mod tests {
         let msg = crate::mail::message("m1").unwrap();
         assert_eq!(msg.body_html.as_deref(), Some("<p>hello</p>"));
         assert!(root.join("temp_staging").exists());
+    }
+
+    /// Every path the app keeps or shows (the data folder pointer, the pending target, the moved-to folder) is a plain
+    /// absolute path: on Windows `C:\Users\…`, never the `\\?\` verbatim form `std::fs::canonicalize` produces.
+    #[test]
+    fn stored_and_shown_paths_never_carry_the_verbatim_prefix() {
+        let _g = storage::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        TEST_STOP.store(0, SeqCst);
+        let (tmp, _vault) = setup();
+        let n = normalize(&tmp.join("not-yet").join("there")).unwrap();
+        assert!(n.is_absolute() && !n.to_string_lossy().starts_with("\\\\?\\"), "{n:?}");
+        let out = run(tmp.join("moved").to_str().unwrap(), |_| {}).unwrap();
+        assert!(!out.starts_with("\\\\?\\"), "{out}");
+        let b = storage::read_bootstrap().unwrap();
+        assert!(!b.active_data_root.starts_with("\\\\?\\") && b.previous_data_root.is_none());
+        assert_eq!(info().unwrap().path, out, "Settings shows the same plain path");
+        // A second move still recognises "inside the current folder" and "same folder" after the switch.
+        assert!(run(Path::new(&out).join("inner").to_str().unwrap(), |_| {}).unwrap_err().to_string().contains("outside"));
+        assert!(run(&out, |_| {}).unwrap_err().to_string().contains("outside"));
     }
 
     #[test]
@@ -493,8 +515,8 @@ mod tests {
             phases.lock().unwrap().push(p.phase)
         })
         .unwrap();
-        let target = target.canonicalize().unwrap();
-        assert_eq!(Path::new(&out), target);
+        let target = dunce::canonicalize(&target).unwrap();
+        assert_eq!(Path::new(&out), target, "the path handed back to the UI is canonical but has no verbatim prefix");
         assert_works_at(&target);
         assert!(
             !vault.join("db").exists() && !vault.join("blobs").exists(),
@@ -508,7 +530,7 @@ mod tests {
         assert_eq!(list_blobs(&target).len(), 2);
         // a second move works too (back again)
         run(vault.to_str().unwrap(), |_| {}).unwrap();
-        assert_works_at(&vault.canonicalize().unwrap());
+        assert_works_at(&dunce::canonicalize(&vault).unwrap());
     }
 
     #[test]
@@ -521,7 +543,7 @@ mod tests {
             let err = run(target.to_str().unwrap(), |_| {}).unwrap_err();
             assert!(err.to_string().contains("injected"), "phase {phase}: {err}");
             TEST_STOP.store(0, SeqCst);
-            assert_works_at(&vault.canonicalize().unwrap());
+            assert_works_at(&dunce::canonicalize(&vault).unwrap());
             assert!(
                 !target.join("db").exists() && !target.join(STAGING).exists(),
                 "phase {phase}: leftovers"
@@ -544,7 +566,7 @@ mod tests {
             );
             // "restart"
             assert!(storage::open_existing().unwrap());
-            assert_works_at(&vault.canonicalize().unwrap());
+            assert_works_at(&dunce::canonicalize(&vault).unwrap());
             assert!(
                 !target.exists() || fs::read_dir(&target).unwrap().next().is_none(),
                 "phase {phase}: copy not cleaned"
@@ -567,7 +589,7 @@ mod tests {
             "old copy still there at the moment of the crash"
         );
         assert!(storage::open_existing().unwrap()); // "restart"
-        assert_works_at(&target.canonicalize().unwrap());
+        assert_works_at(&dunce::canonicalize(&target).unwrap());
         assert!(!vault.join("db").exists(), "old copy removed by recovery");
     }
 
@@ -601,7 +623,7 @@ mod tests {
             full.join("keep.txt").exists(),
             "user files are never touched"
         );
-        assert_works_at(&vault.canonicalize().unwrap());
+        assert_works_at(&dunce::canonicalize(&vault).unwrap());
     }
 
     #[tokio::test]
@@ -621,6 +643,6 @@ mod tests {
         );
         drop(busy);
         job.await.unwrap().unwrap();
-        assert_works_at(&target.canonicalize().unwrap());
+        assert_works_at(&dunce::canonicalize(&target).unwrap());
     }
 }

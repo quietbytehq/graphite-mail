@@ -7,6 +7,8 @@ import { initials } from "./recipients";
 import { ContextMenu, MenuItem } from "./ContextMenu";
 import { ContactActions, contactMenu, firstAddresses, MenuContact, vcfName } from "./contactMenu";
 import { clickSelect, prune, selectAll, Selection, single } from "./selection";
+import { adminApproval } from "./signIn";
+import AdminApproval from "./AdminApproval";
 
 export type ContactSource = "directory" | "personal" | "emailed" | "imported";
 export type ContactRow = {
@@ -17,8 +19,10 @@ export type ContactRow = {
 type Group = { total: number; rows: ContactRow[] };
 export type ContactStatus = {
   email: string; granted: boolean;
-  /** "ok" | "never" | "needs_consent" | "blocked" | "error" | "removed" */
+  /** "ok" | "never" | "needs_consent" | "blocked" | "error" | "removed"; the directory is "n/a" for personal accounts */
   directory: string; personal: string;
+  /** A personal Microsoft account (outlook.com, hotmail.com, live.com): no organisation directory. */
+  personal_account?: boolean;
   directory_count: number; personal_count: number; last_sync: number | null;
 };
 export type Overview = { favourites?: Group; directory: Group; personal: Group; emailed?: Group; imported?: Group; accounts: ContactStatus[] };
@@ -60,7 +64,7 @@ export function importLine(r: ImportReport) {
 
 /** Why one account's contacts can't be shown, in words (null when nothing needs saying). */
 export function statusNote(s: ContactStatus): { text: string; grant: boolean } | null {
-  const parts = [s.directory, s.personal];
+  const parts = [s.directory, s.personal].filter((p) => p !== "n/a");
   if (parts.includes("needs_consent")) return { text: `Graphite Mail needs your permission to read contacts and your organisation's directory for ${s.email}.`, grant: true };
   if (parts.includes("blocked")) {
     const what = s.directory === "blocked" && s.personal === "blocked" ? "contacts and the directory" : s.directory === "blocked" ? "the directory" : "your contacts";
@@ -137,7 +141,11 @@ export default function ContactsView({ accounts, onNewEmail, onNewMeeting, onSea
 
   // The groups that make sense for the accounts shown (all of them, or the one chosen in the account filter).
   const chosenKind = account ? (usable.find((a) => a.email === account)?.provider === "imap" ? "imap" : "microsoft") : null;
-  const groups = GROUPS.filter((g) => g.kind === "any" || (chosenKind ? g.kind === chosenKind : g.kind === "microsoft" ? ms.length > 0 : imap.length > 0));
+  // Personal Microsoft accounts have no organisation directory: the group is left out when none of the accounts shown has one.
+  const statusesShown = (data?.accounts ?? []).filter((s) => !account || s.email.toLowerCase() === account.toLowerCase());
+  const noDirectory = data !== null && statusesShown.length > 0 && statusesShown.every((s) => s.personal_account);
+  const groups = GROUPS.filter((g) => g.kind === "any" || (chosenKind ? g.kind === chosenKind : g.kind === "microsoft" ? ms.length > 0 : imap.length > 0))
+    .filter((g) => !(g.key === "directory" && noDirectory));
 
   // Every contact shown, in list order (a favourite appears twice; it counts once).
   const order = useMemo(() => {
@@ -269,11 +277,11 @@ export default function ContactsView({ accounts, onNewEmail, onNewMeeting, onSea
           ))}
           {showImap && (
             <div className="notice cnotice" role="note">
-              <span>{GOOGLE_CONTACTS_NOTE} Until then, people you've emailed are listed from your mail, and you can import a vCard or Google Contacts CSV file.</span>
+              <span>{imap.some((a) => !a.imap) ? `${GOOGLE_CONTACTS_NOTE} Until then, people` : "Your provider's own address book isn't synced for IMAP accounts. People"} you've emailed are listed from your mail, and you can import a vCard or Google Contacts CSV file.</span>
               <button disabled={importing} onClick={importContacts}>{importing ? "Importing…" : "Import contacts…"}</button>
             </div>
           )}
-          {error && <div className="error" role="alert" style={{ padding: "4px 8px" }}>{error}</div>}
+          {error && (adminApproval(error) ? <AdminApproval message={adminApproval(error)!} email={granting || account || undefined} /> : <div className="error" role="alert" style={{ padding: "4px 8px" }}>{error}</div>)}
           {groups.map((g) => {
             const grp = data?.[g.key];
             if (g.key === "favourites" && !grp?.total) return null; // shown once there are favourites

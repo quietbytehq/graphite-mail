@@ -158,3 +158,42 @@ describe("Bcc", () => {
     }
   });
 });
+
+describe("Quoting the message being answered", () => {
+  const hostile = '<p>Original</p><img src="https://track.example/p.gif"><img src="x" onerror="alert(1)"><a href="javascript:alert(1)">bad</a><a href="https://ok.example/">ok</a><style>body{display:none}</style><form action="https://evil.example"><input name="pw"></form>';
+  const reply = (quoteImages = false) => render(<Compose init={{ mode: "reply", to: ["a@b.com"], quoteHtml: hostile, quoteHeader: 'On Monday, <img src=x onerror=alert(1)> "Eve" <eve@x.com> wrote:', quoteImages }}
+    accounts={[{ email: "me@corp.com", display_name: "Me" }]} onClose={() => {}} onSent={() => {}} />);
+  const editor = () => document.querySelector(".editor") as HTMLElement;
+
+  it("quotes a sanitised copy: no handlers, scripts, styles, forms, bad links or remote pictures", async () => {
+    reply();
+    await waitFor(() => expect(editor().querySelector("blockquote")).not.toBeNull());
+    const q = editor().querySelector("blockquote")!;
+    expect(q.textContent).toContain("Original");
+    expect(q.querySelectorAll("style, form, input, script").length).toBe(0);
+    expect(q.innerHTML).not.toMatch(/onerror|javascript:|track\.example/);
+    expect(q.querySelector("a[href]")?.getAttribute("href")).toBe("https://ok.example/");
+  });
+
+  it("puts the header in as text, so a sender name can't add markup", async () => {
+    reply();
+    await waitFor(() => expect(editor().querySelector("blockquote")).not.toBeNull());
+    const header = editor().querySelector("blockquote")!.previousElementSibling!;
+    expect(header.textContent).toBe('On Monday, <img src=x onerror=alert(1)> "Eve" <eve@x.com> wrote:');
+    expect(header.querySelector("img")).toBeNull();
+  });
+
+  it("keeps https pictures only when the user loaded the message's images", async () => {
+    reply(true);
+    await waitFor(() => expect(editor().querySelector("blockquote")).not.toBeNull());
+    expect(editor().querySelector("blockquote img")?.getAttribute("src")).toBe("https://track.example/p.gif");
+  });
+
+  it("a reopened draft is sanitised too", async () => {
+    render(<Compose init={{ mode: "new", draftId: "d1", html: '<div data-sig="1">Sig</div><p>Mine</p><img src=x onerror="alert(1)"><script>alert(1)</script>' }}
+      accounts={[{ email: "me@corp.com", display_name: "Me" }]} onClose={() => {}} onSent={() => {}} />);
+    await waitFor(() => expect(editor().textContent).toContain("Mine"));
+    expect(editor().innerHTML).not.toMatch(/onerror|<script/);
+    expect(editor().querySelector("[data-sig]")).not.toBeNull(); // the signature can still be swapped
+  });
+});

@@ -1344,7 +1344,9 @@ pub(crate) mod tests {
         // Without blind copies there is no Bcc header at all.
         let raw = build_raw(("Me", "g@x.com"), &["a@b.c".into()], &["c@d.e".into()], &[], "Hi", "<p>x</p>", None, &[]).unwrap();
         let text = String::from_utf8_lossy(&raw).to_string();
-        assert!(!text.to_ascii_lowercase().contains("bcc"), "{text}");
+        // (Only header lines count: the random MIME boundary can contain the letters "bcc".)
+        assert!(!text.lines().any(|l| l.to_ascii_lowercase().starts_with("bcc:")), "{text}");
+        assert!(!text.contains("hidden"));
         // With them, the Gmail API needs the Bcc header (it turns it into envelope recipients and strips it on delivery);
         // the address must not be in To or Cc.
         let raw = build_raw(("Me", "g@x.com"), &["a@b.c".into()], &["c@d.e".into()], &["hidden@x.com".into()], "Hi", "<p>x</p>", None, &[]).unwrap();

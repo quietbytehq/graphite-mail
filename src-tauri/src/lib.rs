@@ -7,6 +7,7 @@ mod folders;
 mod google;
 mod http;
 mod imap;
+mod images;
 mod links;
 mod mail;
 mod notify;
@@ -227,6 +228,18 @@ fn list_folders() -> CmdResult<Vec<mail::Folder>> {
 #[tauri::command]
 fn list_messages(folder_id: String, offset: i64, limit: i64) -> CmdResult<Vec<mail::MessageRow>> {
     mail::messages(&folder_id, offset, limit).map_err(|e| e.to_string())
+}
+
+/// Whether this sender's remote images are always loaded.
+#[tauri::command]
+fn image_sender_allowed(address: String) -> CmdResult<bool> {
+    images::allowed(&address).map_err(|e| e.to_string())
+}
+
+/// "Always load images from this sender" (allowed) or "Stop loading them".
+#[tauri::command]
+fn set_image_sender(address: String, allowed: bool) -> CmdResult<()> {
+    images::set(&address, allowed).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -620,6 +633,8 @@ pub fn run() {
             list_folders,
             list_messages,
             get_message,
+            image_sender_allowed,
+            set_image_sender,
             search_messages,
             set_read,
             set_flag,

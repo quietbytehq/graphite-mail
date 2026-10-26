@@ -103,7 +103,10 @@ export default function Mailbox({ account: _first, onSignOut }: { account: Accou
   const [syncing, setSyncing] = useState(false);
   const [status, setStatus] = useState("");
   const [online, setOnline] = useState(navigator.onLine);
+  // Remote images: loaded for this message only ("Load images"), or always for senders the user trusts.
   const [allowRemote, setAllowRemote] = useState(false);
+  const [trustedSender, setTrustedSender] = useState(false);
+  const showImages = allowRemote || trustedSender;
   const [themeChoice, setThemeChoice] = useState<ThemeChoice>(cachedChoice);
   const [sysDark, setSysDark] = useState(() => matchMedia("(prefers-color-scheme: dark)").matches);
   const dark = isDark(resolveTheme(themeChoice, sysDark));
@@ -284,7 +287,7 @@ export default function Mailbox({ account: _first, onSignOut }: { account: Accou
     const me = s.account_email.toLowerCase();
     const header = `On ${new Date(s.received_at * 1000).toLocaleString()}, ${s.sender_name ?? ""} <${s.sender_address ?? ""}> wrote:`; // plain text
     const subj = s.subject ?? "";
-    const base = { replyTo: s.id, from: s.account_email, quoteHtml: s.body_html ?? "", quoteHeader: header, quoteImages: allowRemote };
+    const base = { replyTo: s.id, from: s.account_email, quoteHtml: s.body_html ?? "", quoteHeader: header, quoteImages: showImages };
     if (mode === "forward") return setCompose({ ...base, mode, subject: /^fw(d)?:/i.test(subj) ? subj : `Fw: ${subj}` });
     const re = /^re:/i.test(subj) ? subj : `Re: ${subj}`;
     const to = [s.sender_address ?? ""].filter(Boolean);
@@ -376,11 +379,13 @@ export default function Mailbox({ account: _first, onSignOut }: { account: Accou
 
   const open = async (m: Msg) => {
     setAllowRemote(false);
+    setTrustedSender(false);
     setMoveOpen(false);
     setSel(single(m.id));
     const d = await invoke<Detail>("get_message", { id: m.id });
     setSelected(d);
     setAtts([]);
+    if (m.sender_address) invoke<boolean>("image_sender_allowed", { address: m.sender_address }).then((ok) => setSelected((s) => { if (s && s.id === m.id) setTrustedSender(!!ok); return s; })).catch(() => {});
     if (m.has_attachments) invoke<Att[]>("list_attachments", { messageId: m.id }).then((a) => setSelected((s) => { if (s && s.id === m.id) setAtts(a); return s; })).catch(() => {});
     if (!m.is_read) {
       invoke("set_read", { id: m.id, read: true }).then(() => { patch(m.id, { is_read: true }); loadFolders(); }).catch(() => {});
@@ -388,9 +393,24 @@ export default function Mailbox({ account: _first, onSignOut }: { account: Accou
   };
 
   const rendered = useMemo(
-    () => (selected?.body_html ? buildDoc(selected.body_html, allowRemote, dark && darkMail) : null),
-    [selected, allowRemote, dark, darkMail],
+    () => (selected?.body_html ? buildDoc(selected.body_html, showImages, dark && darkMail) : null),
+    [selected, showImages, dark, darkMail],
   );
+  // How many remote images the message has (also when they are shown, for the "always load" bar).
+  const remoteImages = useMemo(
+    () => (!selected?.body_html ? 0 : showImages ? buildDoc(selected.body_html, false, false).blocked : rendered?.blocked ?? 0),
+    [selected, showImages, rendered],
+  );
+  const trustSender = async (allowed: boolean) => {
+    const address = selected?.sender_address;
+    if (!address) return;
+    try {
+      await invoke("set_image_sender", { address, allowed });
+      setTrustedSender(allowed);
+      if (!allowed) setAllowRemote(false);
+      flash(allowed ? `Images from ${address} will always be loaded` : `Images from ${address} will be blocked again`);
+    } catch (e) { flash(String(e)); }
+  };
 
   const current = folders.find((f) => f.id === folderId);
   const inboxes = folders.filter((f) => f.well_known === "inbox");
@@ -716,10 +736,19 @@ export default function Mailbox({ account: _first, onSignOut }: { account: Accou
                 ))}
               </div>
             )}
-            {rendered && rendered.blocked > 0 && !allowRemote && (
-              <div className="notice">
-                <span>Remote content was blocked to protect your privacy.</span>
-                <button onClick={() => setAllowRemote(true)}>Load</button>
+            {rendered && remoteImages > 0 && !showImages && (
+              <div className="notice imgbar">
+                <span>Images from the internet were blocked to protect your privacy.</span>
+                <span className="imgbar-actions">
+                  <button onClick={() => setAllowRemote(true)}>Load images</button>
+                  {selected.sender_address && <button onClick={() => trustSender(true)}>Always load from {selected.sender_address}</button>}
+                </span>
+              </div>
+            )}
+            {rendered && remoteImages > 0 && trustedSender && (
+              <div className="notice imgbar">
+                <span>Images from {selected.sender_address} are always loaded.</span>
+                <button onClick={() => trustSender(false)}>Stop loading them</button>
               </div>
             )}
             {rendered ? (

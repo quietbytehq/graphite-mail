@@ -15,6 +15,35 @@
   GitHub Actions on Node 24 (checkout v5, setup-node v5, cache v5, upload-artifact v5, download-artifact v6).
 - The sidebar probes Microsoft's Conversation History and Sync Issues folders by role (from 1.11.1).
 
+### Security
+Hardening after an external review. Each point has tests; `test-fixtures/hostile-mail` holds hostile emails that the
+test suite runs through the reader, and `scripts/send-test-mails.py` sends them to a test mailbox of your choice.
+- **Email HTML**: message bodies and calendar descriptions are shown only in a sandboxed frame with
+  `sandbox="allow-popups"` — no scripts and, new, no `allow-same-origin` (the frame used to share the app's origin).
+  HTML is cleaned with DOMPurify (pinned to 3.4.17): scripts, event-handler attributes, forms and form controls,
+  iframes/objects/embeds, `meta` (refresh), `base`, `link`, SVG/MathML and `javascript:`/`data:`/`file:` addresses are
+  removed, and a frame Content-Security-Policy blocks anything left. Replies and forwards no longer put the original
+  message into the editor as an HTML string (it is inserted as a sanitised fragment, the "… wrote:" line as plain text,
+  which also fixes markup in a sender's name), and calendar descriptions no longer use `dangerouslySetInnerHTML`.
+- **Remote images** are blocked by default, with a placeholder bar per message: **Load images** (this message) or
+  **Always load from** the sender (undo with **Stop loading them**). Pictures inside the message (`cid:`, `data:`) still
+  show. Remote style sheets and fonts are never loaded.
+- **Links**: every link in a message asks for a new window, whatever its `target`; the app refuses the window and only
+  acts on `http`/`https` (system browser) and `mailto` (new message). Everything else does nothing. The windows can't
+  navigate away from the app: other hosts on the app's scheme and `ipc:`/`asset:` are now refused too, and the splash
+  window has the same navigation handler.
+- **Attachments**: file names lose path separators, `..`, control and invisible (right-to-left override) characters
+  and Windows device names (`CON`, `COM¹`, `CONIN$` …); saving always writes directly into the chosen folder (no links
+  followed, mode 0600, marked as downloaded on Windows). Programs, scripts, installers, disk images, shortcuts,
+  `.desktop` files and files without an extension are only saved, never opened from the app. Opened copies live in a
+  private per-user folder instead of `/tmp`.
+- **Permissions**: the app grants only the Tauri permissions its UI uses (no webview/window creation, always-on-top,
+  notification, tray, opener or devtools permissions, and no conflicting allow/deny pairs); `dialog:allow-ask`
+  (deprecated alias) became `dialog:allow-message`. Developer tools are off in release builds.
+- **Data folder** (Linux): folders are 0700 and files 0600 — database, messages, attachments and the settings
+  pointer. Folders created by earlier versions are fixed at start-up.
+- Tests: a flaky check (a random Message-ID could contain "bcc") no longer fails about one run in a hundred.
+
 ## 1.11.1 — Sidebar: matte tiles
 - New sidebar look ("Option B"): every folder has a flat coloured 24 px tile with a white glyph (Inbox blue, Drafts
   ochre, Sent green, Archive purple, Deleted red, Junk orange, Outbox teal, Sync Issues grey, everything else the

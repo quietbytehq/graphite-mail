@@ -25,3 +25,10 @@ dist-ssr
 
 # Google OAuth client settings (never commit)
 src-tauri/google_oauth.json
+
+# snapcraft (sudo snapcraft pack --destructive-mode builds in the project folder)
+parts
+stage
+prime
+*.snap
+snap/.snapcraft

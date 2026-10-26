@@ -198,6 +198,13 @@ fn initialize_storage(path: String) -> CmdResult<()> {
     storage::initialize(&path).map_err(|e| e.to_string())
 }
 
+/// Whether the system keyring (sign-in tokens, app passwords) can be used, and if not, what to do: in the strict
+/// snap the `password-manager-service` interface must be connected once.
+#[tauri::command]
+fn keyring_status() -> auth::KeyringStatus {
+    auth::keyring_status()
+}
+
 #[tauri::command]
 async fn sync_now(app: tauri::AppHandle) -> CmdResult<sync::SyncReport> {
     let r = sync::sync_all().await.map_err(|e| e.to_string())?;
@@ -629,6 +636,7 @@ pub fn run() {
             check_session,
             setup_state,
             initialize_storage,
+            keyring_status,
             sync_now,
             list_folders,
             list_messages,

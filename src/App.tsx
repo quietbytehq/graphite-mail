@@ -12,6 +12,8 @@ import "./App.css";
 
 type Account = { email: string; display_name: string };
 type SetupState = { ready: boolean; default_dir: string };
+/** The system keyring (sign-in tokens, app passwords): usable, or what is wrong and the command that fixes it. */
+type KeyringStatus = { ok: boolean; message: string; command: string };
 
 // Show the last theme at once; the saved app setting is loaded (and applied) by the mailbox.
 applyTheme(cachedChoice());
@@ -49,6 +51,18 @@ function SetupWizard({ defaultDir, onDone }: { defaultDir: string; onDone: () =>
   );
 }
 
+/** Shown instead of a silent failure when the keyring can't be reached: in the strict snap, the one-off
+ *  `snap connect` command; elsewhere, the keyring to install. Sign-in stays off until "Check again" succeeds. */
+function KeyringNotice({ status, onRetry }: { status: KeyringStatus; onRetry: () => void }) {
+  return (
+    <div className="keyring" role="alert">
+      <div className="error">{status.message}</div>
+      {status.command && <pre className="command">{status.command}</pre>}
+      <button onClick={onRetry}>Check again</button>
+    </div>
+  );
+}
+
 function Onboard({ children }: { children: React.ReactNode }) {
   return (
     <div className="onboard">
@@ -74,9 +88,13 @@ export default function App() {
   useEffect(() => { invoke<boolean>("google_sign_in_available").then(setGoogleOk).catch(() => setGoogleOk(false)); }, []);
 
   const loadSetup = () => invoke<SetupState>("setup_state").then(setSetup).catch((e) => setError(String(e)));
+  // null = the keyring works (or the check itself failed, which a sign-in will report in its own words).
+  const [keyring, setKeyring] = useState<KeyringStatus | null>(null);
+  const checkKeyring = () => invoke<KeyringStatus | null>("keyring_status").then((s) => setKeyring(s && !s.ok ? s : null)).catch(() => setKeyring(null));
 
   useEffect(() => {
     loadSetup();
+    checkKeyring();
     invoke<Account | null>("current_account").then(setAccount);
   }, []);
 
@@ -109,14 +127,15 @@ export default function App() {
     <Onboard>
       <h1>Graphite Mail</h1>
       <p className="muted">Offline-first mail &amp; calendar for Microsoft 365 and Gmail.</p>
+      {keyring && <KeyringNotice status={keyring} onRetry={checkKeyring} />}
       <div className="row" style={{ justifyContent: "center" }}>
-        <button className="primary" onClick={() => start("microsoft")} disabled={busy}>
+        <button className="primary" onClick={() => start("microsoft")} disabled={busy || !!keyring}>
           {signIn.waiting === "microsoft" ? "Waiting for browser sign-in…" : "Sign in with Microsoft"}
         </button>
-        {googleOk && <button onClick={() => start("google")} disabled={busy}>{signIn.waiting === "google" ? "Waiting for browser sign-in…" : "Sign in with Google"}</button>}
+        {googleOk && <button onClick={() => start("google")} disabled={busy || !!keyring}>{signIn.waiting === "google" ? "Waiting for browser sign-in…" : "Sign in with Google"}</button>}
       </div>
       {googleOk === false && <p className="muted">Google sign-in coming soon. Use an app password for now.</p>}
-      <button className="linkish" onClick={() => { setError(""); setNote(""); setAppPassword(true); }} disabled={busy}>Use Gmail or another email account with an app password</button>
+      <button className="linkish" onClick={() => { setError(""); setNote(""); setAppPassword(true); }} disabled={busy || !!keyring}>Use Gmail or another email account with an app password</button>
       {busy && (
         <div className="row" style={{ justifyContent: "center", alignItems: "center" }}>
           <span className="muted">Finish signing in in your web browser, then come back here.</span>

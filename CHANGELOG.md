@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.12.1 — Snap Store
+Packaging only: no changes to mail, calendar or contacts.
+- **Snap**: Graphite Mail is packaged as a strictly confined snap (`snap/snapcraft.yaml`: core24, the GNOME extension,
+  built from source the way Timewizer's snap is) and published to the Snap Store as `graphite-mail` by the release
+  workflow: a version tag uploads to **stable**, a manual run of the workflow to **edge** for testing. Every build job
+  (`.deb`, Windows installer, snap) now fails if a Google client secret (`GOCSPX`) is found in what it built.
+- **Keyring check**: when the system keyring can't be reached, the sign-in screen says so and shows what to do (in the
+  snap: `sudo snap connect graphite-mail:password-manager-service`, which is not connected automatically) instead of
+  letting a sign-in fail at the end with a D-Bus error. A failed save to the keyring says the same.
+- In the snap the default data folder is `~/snap/graphite-mail/common/graphite-mail` (not the per-revision folder that
+  snapd copies on every update), with the same private permissions. Data from the `.deb` doesn't carry over by itself;
+  the README says how to reuse it.
+
 ## 1.12.0 — Other email providers, personal Microsoft accounts, admin approval
 - **Other email (IMAP)**: Yahoo, iCloud, Zoho, Fastmail and AOL presets (servers filled in, short help on creating an
   app password for each) and a custom IMAP/SMTP server (host, port, TLS / STARTTLS, user name). Gmail-only behaviour

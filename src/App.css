@@ -198,6 +198,8 @@ input:disabled, textarea:disabled { opacity: .6; }
 .onboard img.logo { width: 88px; height: 88px; filter: drop-shadow(0 6px 14px rgba(0,0,0,.18)); }
 .onboard h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; margin: 14px 0 6px; }
 .onboard .row { display: flex; gap: 8px; margin: 20px 0; }
+.onboard .keyring { text-align: left; margin: 14px 0 4px; font-size: 13px; }
+.onboard .keyring .command { font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--field); padding: 8px 10px; border-radius: 8px; margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
 .onboard .row input { flex: 1; }
 
 /* Main window */

@@ -39,14 +39,27 @@ fn bootstrap_path() -> Result<PathBuf> {
 
 /// Where mail goes unless the user picks another place: `~/.local/share/graphite-mail` on Linux,
 /// `%LOCALAPPDATA%\graphite-mail` on Windows (local, not roaming: a mailbox can be gigabytes).
-/// In the snap: `~/snap/graphite-mail/common/graphite-mail`.
+/// In the snap (Linux only): `~/snap/graphite-mail/common/graphite-mail`.
 pub fn default_data_dir() -> String {
-    default_data_dir_in(std::env::var_os("SNAP_USER_COMMON").map(PathBuf::from), dirs::data_local_dir())
+    #[cfg(target_os = "linux")]
+    {
+        default_data_dir_in(std::env::var_os("SNAP_USER_COMMON").map(PathBuf::from), dirs::data_local_dir())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("graphite-mail")
+            .to_string_lossy()
+            .into()
+    }
 }
 
 /// The snap's `$SNAP_USER_COMMON` (`~/snap/graphite-mail/common`) wins over the platform's data folder: snapd sets
 /// `$HOME` and `XDG_DATA_HOME` to the per-revision folder (`~/snap/graphite-mail/<revision>`), which it copies on
 /// every update and deletes with old revisions. A mailbox of several gigabytes must stay in one place.
+/// Snaps exist only on Linux, so this (and its test) is Linux-only.
+#[cfg(target_os = "linux")]
 fn default_data_dir_in(snap_common: Option<PathBuf>, data_local: Option<PathBuf>) -> String {
     snap_common
         .filter(|p| p.is_absolute())
@@ -494,15 +507,14 @@ CREATE TABLE IF NOT EXISTS offline_mutation_queue (
 
 #[cfg(test)]
 mod tests {
+    /// Snaps exist only on Linux (and the paths here are Linux paths).
+    #[cfg(target_os = "linux")]
     #[test]
     fn in_the_snap_the_default_data_folder_is_the_common_folder_that_survives_updates() {
         use std::path::PathBuf;
-        // Absolute on Windows too (a bare "/home/..." has no drive letter there), and joined the way the code joins.
-        let local_dir = std::env::temp_dir().join("ann").join(".local").join("share");
-        let common = std::env::temp_dir().join("ann").join("snap").join("graphite-mail").join("common");
-        let local = Some(local_dir.clone());
-        assert_eq!(super::default_data_dir_in(None, local.clone()), local_dir.join("graphite-mail").to_string_lossy());
-        assert_eq!(super::default_data_dir_in(Some(common.clone()), local.clone()), common.join("graphite-mail").to_string_lossy());
+        let local = Some(PathBuf::from("/home/ann/.local/share"));
+        assert_eq!(super::default_data_dir_in(None, local.clone()), "/home/ann/.local/share/graphite-mail");
+        assert_eq!(super::default_data_dir_in(Some(PathBuf::from("/home/ann/snap/graphite-mail/common")), local.clone()), "/home/ann/snap/graphite-mail/common/graphite-mail");
         // an empty or relative SNAP_USER_COMMON is ignored
         assert_eq!(super::default_data_dir_in(Some(PathBuf::from("")), local.clone()), super::default_data_dir_in(None, local.clone()));
         assert_eq!(super::default_data_dir_in(Some(PathBuf::from("common")), local.clone()), super::default_data_dir_in(None, local));

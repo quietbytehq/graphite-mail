@@ -127,7 +127,7 @@ fn sync_dir(p: &Path) {
 /// Copies one file, reads it back from the new place and compares. Returns its size.
 fn copy_verified(src: &Path, dst: &Path) -> Result<u64> {
     if let Some(dir) = dst.parent() {
-        fs::create_dir_all(dir)?;
+        storage::private_dir(dir)?;
     }
     let tmp = dst.with_extension("moving-tmp");
     let mut hasher = Sha256::new();
@@ -136,7 +136,7 @@ fn copy_verified(src: &Path, dst: &Path) -> Result<u64> {
         let mut r =
             fs::File::open(src).with_context(|| format!("Cannot read {}", src.display()))?;
         let mut w =
-            fs::File::create(&tmp).with_context(|| format!("Cannot write {}", tmp.display()))?;
+            storage::private_file(&tmp).with_context(|| format!("Cannot write {}", tmp.display()))?;
         let mut buf = vec![0u8; 1 << 20];
         loop {
             let n = r.read(&mut buf)?;
@@ -320,7 +320,7 @@ fn validate(source: &Path, target: &Path) -> Result<PathBuf> {
 
 fn copy_and_switch(source: &Path, dest: &Path, say: &dyn Fn(u8, &str, u64, u64)) -> Result<()> {
     let stage = dest.join(STAGING);
-    fs::create_dir_all(stage.join("blobs"))?;
+    storage::private_dir(&stage.join("blobs"))?;
 
     // Phase 3: bulk copy of saved mail while the app keeps working.
     let first = list_blobs(source);
@@ -347,10 +347,11 @@ fn copy_and_switch(source: &Path, dest: &Path, say: &dyn Fn(u8, &str, u64, u64))
         }
     }
     let _ = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
-    fs::create_dir_all(stage.join("db"))?;
+    storage::private_dir(&stage.join("db"))?;
     let snap = stage.join("db").join("mail_core.sqlite");
     db.execute("VACUUM INTO ?1", [snap.to_string_lossy().as_ref()])?;
-    fs::create_dir_all(stage.join("temp_staging"))?;
+    storage::make_private(&snap);
+    storage::private_dir(&stage.join("temp_staging"))?;
     checkpoint(4)?;
 
     // Phase 5: check the copy before relying on it.

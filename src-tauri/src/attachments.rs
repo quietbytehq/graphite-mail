@@ -276,14 +276,8 @@ pub async fn prepare_open(att_id: &str) -> Result<PathBuf> {
     }
     let (name, data) = bytes(att_id).await?;
     let dir = temp_root().join(uuid::Uuid::new_v4().to_string());
-    std::fs::create_dir_all(&dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        for d in [temp_root().parent().unwrap_or(&dir), temp_root().as_path(), dir.as_path()] {
-            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))?;
-        }
-    }
+    crate::storage::private_dir(&dir)?;
+    crate::storage::make_private(temp_root().parent().unwrap_or(&dir)); // our own cache folder
     let path = place(&dir, &name)?;
     write_file(&path, &data)?;
     Ok(path)

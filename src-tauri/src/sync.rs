@@ -340,11 +340,11 @@ pub fn write_blob(bytes: &[u8], ext: &str) -> Result<String> {
         .map(|b| format!("{b:02x}"))
         .collect();
     let dir = storage::blob_dir()?.join(&hash[..2]);
-    fs::create_dir_all(&dir)?;
+    storage::private_dir(&dir)?;
     let path = dir.join(format!("{hash}.{ext}"));
     if !path.exists() {
         let tmp = dir.join(format!("{hash}.tmp"));
-        fs::write(&tmp, bytes)?;
+        std::io::Write::write_all(&mut storage::private_file(&tmp)?, bytes)?;
         fs::rename(tmp, &path)?;
     }
     Ok(hash)

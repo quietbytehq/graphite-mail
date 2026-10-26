@@ -269,6 +269,75 @@ pub(crate) fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
+/// Whether this process runs inside the Graphite Mail snap (snapd sets SNAP_NAME for every confined app).
+pub fn in_snap() -> bool {
+    std::env::var("SNAP_NAME").is_ok_and(|n| n == "graphite-mail")
+}
+
+/// The one command that lets the strict snap talk to the Secret Service keyring (the interface is not connected
+/// automatically unless the store grants it).
+pub const SNAP_KEYRING_COMMAND: &str = "sudo snap connect graphite-mail:password-manager-service";
+
+/// How the system keyring looks to the UI: usable, or what is wrong and what to do about it.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct KeyringStatus {
+    pub ok: bool,
+    /// When not ok: the problem and the remedy, in plain words (never a bare D-Bus error).
+    pub message: String,
+    /// When not ok and one command fixes it (the snap's keyring permission): that command, for the UI to show as is.
+    pub command: String,
+}
+
+impl KeyringStatus {
+    pub fn fine() -> Self {
+        Self { ok: true, message: String::new(), command: String::new() }
+    }
+}
+
+/// Turns a keyring failure into advice. `locked`: the keyring exists but is locked or its unlock prompt was dismissed
+/// (keyring's NoStorageAccess); anything else means no Secret Service could be reached at all, which in the snap
+/// is almost always the unconnected `password-manager-service` interface. `detail` is the underlying error text,
+/// kept at the end for bug reports.
+pub fn keyring_advice(locked: bool, detail: &str, snap: bool) -> KeyringStatus {
+    let detail = detail.trim();
+    let tail = if detail.is_empty() { String::new() } else { format!(" ({detail})") };
+    let (message, command) = if locked {
+        (format!("Your system keyring is locked, or its unlock prompt was closed. Graphite Mail keeps sign-in tokens and app passwords there, so unlock it (GNOME Keyring or KWallet) and try again.{tail}"), String::new())
+    } else if snap {
+        (
+            format!(
+                "Graphite Mail can't reach your system keyring, where it keeps sign-in tokens and app passwords. \
+                 The snap needs permission to use it, once: open a terminal, run the command below, then start Graphite Mail again. \
+                 (If no keyring is running at all, install GNOME Keyring or KWallet first.){tail}"
+            ),
+            SNAP_KEYRING_COMMAND.to_string(),
+        )
+    } else {
+        (format!("Graphite Mail can't reach a system keyring, where it keeps sign-in tokens and app passwords. Install and start GNOME Keyring or KWallet, then start Graphite Mail again.{tail}"), String::new())
+    };
+    KeyringStatus { ok: false, message, command }
+}
+
+/// Probes the keyring once (a read of the account list: present, or "no such entry", both mean it works) so the UI
+/// can explain a missing keyring before a sign-in is attempted instead of failing at the end of one.
+#[cfg(not(test))]
+pub fn keyring_status() -> KeyringStatus {
+    match entry("accounts").and_then(|e| e.get_password().map_err(anyhow::Error::from)) {
+        Ok(_) => KeyringStatus::fine(),
+        Err(e) => match e.downcast_ref::<keyring::Error>() {
+            Some(keyring::Error::NoEntry) => KeyringStatus::fine(),
+            Some(k) => keyring_advice(matches!(k, keyring::Error::NoStorageAccess(_)), &k.to_string(), in_snap()),
+            None => keyring_advice(false, &e.to_string(), in_snap()),
+        },
+    }
+}
+
+/// Tests use an in-memory keyring, which is always there.
+#[cfg(test)]
+pub fn keyring_status() -> KeyringStatus {
+    KeyringStatus::fine()
+}
+
 #[cfg(not(test))]
 fn entry(key: &str) -> Result<keyring::Entry> {
     Ok(keyring::Entry::new(KEYRING_SERVICE, key)?)
@@ -279,9 +348,13 @@ fn kr_get(key: &str) -> Result<String> {
     Ok(entry(key)?.get_password()?)
 }
 
+/// A failed write is what a user sees at the end of a sign-in, so it carries the advice (snap permission, no
+/// keyring, locked keyring) rather than a bare "Platform secure storage failure".
 #[cfg(not(test))]
 fn kr_set(key: &str, value: &str) -> Result<()> {
-    Ok(entry(key)?.set_password(value)?)
+    entry(key)?
+        .set_password(value)
+        .map_err(|e| anyhow!(keyring_advice(matches!(e, keyring::Error::NoStorageAccess(_)), &e.to_string(), in_snap()).message))
 }
 
 #[cfg(not(test))]
@@ -561,6 +634,27 @@ pub fn sign_out() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use base64::Engine;
+
+    #[test]
+    fn an_unreachable_keyring_is_explained_with_the_snap_command_or_the_keyring_to_install() {
+        let dbus = "Platform secure storage failure: org.freedesktop.DBus.Error.AccessDenied";
+        let snap = super::keyring_advice(false, dbus, true);
+        assert!(!snap.ok);
+        assert_eq!(snap.command, "sudo snap connect graphite-mail:password-manager-service");
+        assert!(snap.message.contains("can't reach your system keyring") && snap.message.contains("run the command below"), "{}", snap.message);
+        assert!(snap.message.ends_with(&format!("({dbus})")), "the raw error stays at the end for bug reports: {}", snap.message);
+
+        let deb = super::keyring_advice(false, dbus, false);
+        assert!(!deb.ok && deb.command.is_empty());
+        assert!(deb.message.contains("GNOME Keyring or KWallet") && !deb.message.contains("snap"), "{}", deb.message);
+
+        let locked = super::keyring_advice(true, "", true);
+        assert!(locked.message.starts_with("Your system keyring is locked") && locked.command.is_empty() && !locked.message.contains("()"), "{}", locked.message);
+
+        assert!(super::keyring_status().ok, "the test keyring is always there");
+        assert_eq!(super::KeyringStatus::fine(), super::KeyringStatus { ok: true, message: String::new(), command: String::new() });
+        assert!(!super::in_snap(), "tests don't run inside the snap");
+    }
 
     #[test]
     fn admin_approval_is_recognised_from_microsofts_error_texts() {

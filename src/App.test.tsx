@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import App from "./App";
@@ -116,6 +116,42 @@ describe("first-run browser sign-in", () => {
     expect(screen.getByRole("form", { name: "Email with an app password" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.queryByText("Sign-in cancelled.")).toBeNull();
+  });
+});
+
+describe("system keyring", () => {
+  const unreachable = {
+    ok: false,
+    message: "Graphite Mail can't reach your system keyring, where it keeps sign-in tokens and app passwords. The snap needs permission to use it, once: open a terminal, run the command below, then start Graphite Mail again.",
+    command: "sudo snap connect graphite-mail:password-manager-service",
+  };
+
+  it("says what to run when the keyring can't be reached, keeps sign-in off, and comes back after Check again", async () => {
+    let reachable = false;
+    firstStart(true, { keyring_status: () => (reachable ? { ok: true, message: "", command: "" } : unreachable) });
+    const box = await screen.findByRole("alert");
+    expect(box.textContent).toContain("can't reach your system keyring");
+    expect(screen.getByText("sudo snap connect graphite-mail:password-manager-service")).toBeTruthy();
+    for (const name of ["Sign in with Microsoft", "Sign in with Google", "Use Gmail or another email account with an app password"]) {
+      expect(off(screen.getByRole("button", { name }))).toBe(true);
+    }
+    reachable = true;
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(calls("keyring_status")).toBe(2);
+    for (const name of ["Sign in with Microsoft", "Sign in with Google", "Use Gmail or another email account with an app password"]) {
+      expect(off(screen.getByRole("button", { name }))).toBe(false);
+    }
+  });
+
+  it("shows nothing when the keyring works, or when the check itself is unavailable", async () => {
+    firstStart(false, { keyring_status: () => ({ ok: true, message: "", command: "" }) });
+    await screen.findByRole("button", { name: "Sign in with Microsoft" });
+    expect(screen.queryByRole("alert")).toBeNull();
+    cleanup();
+    firstStart(false, { keyring_status: () => Promise.reject("no such command") });
+    expect(off(await screen.findByRole("button", { name: "Sign in with Microsoft" }))).toBe(false);
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
 

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Graphite Mail
+GenericName=Mail and calendar client
+Comment=Offline-first Microsoft 365 and Gmail mail & calendar
+Exec=graphite-mail
+Icon=${SNAP}/meta/gui/graphite-mail.png
+Terminal=false
+Categories=Office;Network;Email;Calendar;
+Keywords=mail;email;calendar;contacts;outlook;microsoft 365;gmail;imap;

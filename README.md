@@ -78,8 +78,43 @@ menus). New to Graphite Mail? Read the **[User Guide](docs/USER-GUIDE.md)**.
 ## Install
 
 Releases are on the GitHub **Releases** page. Each one has a Linux `.deb`, a Linux `.AppImage` and a Windows installer.
+Graphite Mail is also in the **Snap Store** as `graphite-mail`.
 
 ### Linux
+
+**Snap** (Ubuntu and any distribution with snapd) — two commands:
+
+```
+sudo snap install graphite-mail
+sudo snap connect graphite-mail:password-manager-service
+```
+
+The second one matters: the snap is strictly confined, and the keyring connection (`password-manager-service`, the
+Secret Service that GNOME Keyring and KWallet provide) is not connected automatically. Without it Graphite Mail cannot
+save sign-in tokens or app passwords. The app notices and shows that command on its sign-in screen instead of failing
+silently; run it, then start Graphite Mail again. One of `gnome-keyring` or `kwalletmanager` must be installed and
+running, as for the `.deb`.
+
+What the snap can reach: the network, your home folder (for saving attachments and importing contacts; files and
+folders whose names start with a dot are out of bounds, as in every snap), your browser (links and sign-in open there),
+notifications, and, once you run `sudo snap connect graphite-mail:removable-media`, drives under `/media` and `/mnt` (to
+keep the data folder on another disk).
+
+The snap keeps its mail in its own home: `~/snap/graphite-mail/common/graphite-mail` (chosen on the first start; you can
+pick another folder or move it later), with the same private permissions (folders 0700, files 0600). It is not under
+`~/snap/graphite-mail/current`, which snapd copies on every update. **Data from the `.deb` or AppImage does not carry
+over automatically**: the snap has its own settings pointer and starts with the first-run screen. Signed-in accounts
+do carry over, because both use the same keyring entries, so after the first start the snap downloads your mail again.
+To reuse the mail already on disk instead: in the old version, move the data folder (Settings → *Move to another
+folder…*) to a folder the snap can see, for example `~/Mail/graphite-mail`, then stop using the old version and enter
+that folder on the snap's first-run screen (an existing Graphite Mail data folder is adopted as it is). Don't run the
+`.deb` and the snap on the same folder at the same time.
+
+Testing builds are on the `edge` channel (`sudo snap install graphite-mail --edge`; back to the release with
+`sudo snap refresh graphite-mail --stable`). Remove the snap with `sudo snap remove graphite-mail`: snapd keeps a
+snapshot of `~/snap/graphite-mail` (the default data folder included) for 31 days and then deletes it, so copy the
+data folder out first if you want to keep it (`--purge` deletes it at once). A data folder you placed elsewhere is
+left alone.
 
 **Ubuntu / Debian** — download the `.deb`, then:
 
@@ -190,8 +225,11 @@ Graphite Mail only ever asks for what a feature needs, when you first use the fe
 | Other email (IMAP) | Adding the account | the app password (or password) for that server | mail only: no calendar or provider address book, local rules |
 
 On this computer, the app needs nothing special: it reads and writes its own data folder, keeps secrets in the keyring,
-opens links in your browser, shows notifications, and opens a file dialog when you attach, save or import. The release
-builds are made by a public GitHub Actions workflow and never contain a Google client secret.
+opens links in your browser, shows notifications, and opens a file dialog when you attach, save or import. The snap
+spells this out as interfaces (`snap connections graphite-mail`): `network` and `network-bind` (the sign-in redirect on
+`localhost`), `desktop`, `desktop-legacy`, `wayland`, `x11`, `opengl`, `home`, `removable-media` and
+`password-manager-service`; the last two are the ones you connect by hand. The release builds are made by a public
+GitHub Actions workflow and never contain a Google client secret.
 
 Contacts, favourites and the "people you've emailed" list are stored in the local database only, never logged, and are
 deleted by **Remove cached contacts** (Settings) or by removing the account.
@@ -245,7 +283,14 @@ never uses that client or its secret, so it works in every build.
 
 **Releases**: pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`: tests on Linux and Windows, the `.deb` and
 the Windows installer on separate runners, and a **draft** release with both attached. Publish it by hand after checking
-the files. The workflow never has the Google client secret, so those builds have no Google sign-in.
+the files. The same tag builds the snap (`snap/snapcraft.yaml`, from source, on an Ubuntu 24.04 runner) and uploads it
+to the Snap Store's **stable** channel, which goes live at once; running the workflow by hand (Actions → Release → Run
+workflow) uploads the snap to the **edge** channel instead, or only attaches it to the run. The upload uses the
+`SNAPCRAFT_STORE_CREDENTIALS` repository secret (made with `snapcraft export-login`). The workflow never has the Google
+client secret, so those builds have no Google sign-in, and every build job fails if the string `GOCSPX` is found in
+what it built. The store page text is in `snap/STORE_LISTING.md`. To try the snap locally on Ubuntu 24.04:
+`sudo snap install snapcraft --classic`, `sudo snapcraft pack --destructive-mode`, then
+`sudo snap install --dangerous ./graphite-mail_*.snap` and connect the keyring as above.
 
 ## Status
 
